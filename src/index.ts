@@ -1,4 +1,5 @@
-import { v4 as uuidv4 } from 'uuid';
+// Remove the external uuid import causing the crash
+// import { v4 as uuidv4 } from 'uuid'; 
 
 interface Config {
   webId: string;
@@ -18,6 +19,20 @@ interface Payload {
   duration?: number; // Only for pings/unload
 }
 
+// --- Native UUID Helper (Fixes "require('crypto')" error) ---
+function generateUUID(): string {
+  // Use native crypto API if available (Modern Browsers)
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  // Fallback for older environments
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 class SenzorWebAgent {
   private config: Config;
   private startTime: number;
@@ -33,7 +48,7 @@ class SenzorWebAgent {
     this.config = { ...this.config, ...config };
     // Allow overriding endpoint for self-hosting or dev
     this.endpoint = this.config.endpoint || 'https://api.senzor.dev/api/ingest/web';
-    
+
     if (!this.config.webId) {
       console.error('[Senzor] WebId is required to initialize analytics.');
       return;
@@ -50,17 +65,17 @@ class SenzorWebAgent {
   }
 
   private initSession() {
-    // Persistent Visitor ID (1 year) - Rebranded storage key
+    // Persistent Visitor ID (1 year)
     let vid = localStorage.getItem('senzor_vid');
     if (!vid) {
-      vid = uuidv4();
+      vid = generateUUID();
       localStorage.setItem('senzor_vid', vid!);
     }
 
     // Session ID (Expires when browser closes)
     let sid = sessionStorage.getItem('senzor_sid');
     if (!sid) {
-      sid = uuidv4();
+      sid = generateUUID();
       sessionStorage.setItem('senzor_sid', sid!);
     }
   }
@@ -112,6 +127,7 @@ class SenzorWebAgent {
     // Use sendBeacon for reliability during unload, fallback to fetch
     if (navigator.sendBeacon) {
       const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+      // sendBeacon returns false if it fails (e.g. payload too large)
       const success = navigator.sendBeacon(this.endpoint, blob);
       if (!success) this.fallbackSend(data);
     } else {

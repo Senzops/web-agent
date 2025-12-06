@@ -12,9 +12,7 @@
     "tsup": "^8.0.0",
     "typescript": "^5.0.0"
   },
-  "dependencies": {
-    "uuid": "^9.0.0"
-  },
+  "dependencies": {},
   "publishConfig": {
     "access": "public"
   }
