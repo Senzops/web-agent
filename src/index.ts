@@ -1,6 +1,3 @@
-// Remove the external uuid import causing the crash
-// import { v4 as uuidv4 } from 'uuid'; 
-
 interface Config {
   webId: string;
   endpoint?: string;
@@ -16,16 +13,14 @@ interface Payload {
   referrer: string;
   width: number;
   timezone: string;
-  duration?: number; // Only for pings/unload
+  duration?: number;
 }
 
-// --- Native UUID Helper (Fixes "require('crypto')" error) ---
+// Browser-Native UUID (No Node.js dependencies)
 function generateUUID(): string {
-  // Use native crypto API if available (Modern Browsers)
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
     return crypto.randomUUID();
   }
-  // Fallback for older environments
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0;
     const v = c === 'x' ? r : (r & 0x3) | 0x8;
@@ -37,58 +32,76 @@ class SenzorWebAgent {
   private config: Config;
   private startTime: number;
   private endpoint: string;
+  private initialized: boolean;
 
   constructor() {
     this.config = { webId: '', endpoint: 'https://api.senzor.dev/api/ingest/web' };
     this.startTime = Date.now();
     this.endpoint = '';
+    this.initialized = false;
   }
 
   public init(config: Config) {
+    if (this.initialized) {
+      console.warn('[Senzor] Agent already initialized.');
+      return;
+    }
+    this.initialized = true;
+
     this.config = { ...this.config, ...config };
-    // Allow overriding endpoint for self-hosting or dev
     this.endpoint = this.config.endpoint || 'https://api.senzor.dev/api/ingest/web';
 
     if (!this.config.webId) {
-      console.error('[Senzor] WebId is required to initialize analytics.');
+      console.error('[Senzor] WebId is required.');
       return;
     }
 
-    // 1. Initialize Session
-    this.initSession();
+    // 1. Manage Session State
+    this.checkSession();
 
-    // 2. Track Initial Page View
+    // 2. Track initial load
     this.trackPageView();
 
     // 3. Setup Listeners
     this.setupListeners();
   }
 
-  private initSession() {
-    // Persistent Visitor ID (1 year)
-    let vid = localStorage.getItem('senzor_vid');
-    if (!vid) {
-      vid = generateUUID();
-      localStorage.setItem('senzor_vid', vid!);
+  // --- Standard Analytics Session Logic ---
+  // A session ends after 30 minutes of inactivity.
+  private checkSession() {
+    const now = Date.now();
+    const lastActivity = parseInt(localStorage.getItem('senzor_last_activity') || '0', 10);
+    const sessionTimeout = 30 * 60 * 1000; // 30 mins
+
+    // 1. Visitor ID (Persistent 1 Year)
+    if (!localStorage.getItem('senzor_vid')) {
+      localStorage.setItem('senzor_vid', generateUUID());
     }
 
-    // Session ID (Expires when browser closes)
-    let sid = sessionStorage.getItem('senzor_sid');
-    if (!sid) {
-      sid = generateUUID();
-      sessionStorage.setItem('senzor_sid', sid!);
+    // 2. Session ID
+    // Create new if missing OR expired
+    if (!localStorage.getItem('senzor_sid') || (now - lastActivity > sessionTimeout)) {
+      localStorage.setItem('senzor_sid', generateUUID());
     }
+
+    // Update Activity
+    localStorage.setItem('senzor_last_activity', now.toString());
   }
 
   private getIds() {
+    // Refresh activity timestamp on every hit
+    localStorage.setItem('senzor_last_activity', Date.now().toString());
     return {
       visitorId: localStorage.getItem('senzor_vid') || 'unknown',
-      sessionId: sessionStorage.getItem('senzor_sid') || 'unknown'
+      sessionId: localStorage.getItem('senzor_sid') || 'unknown'
     };
   }
 
   private trackPageView() {
-    this.startTime = Date.now(); // Reset timer for new page
+    // Ensure session is valid before tracking
+    this.checkSession();
+    this.startTime = Date.now();
+
     const payload: Payload = {
       type: 'pageview',
       webId: this.config.webId,
@@ -103,10 +116,9 @@ class SenzorWebAgent {
     this.send(payload);
   }
 
-  // Captures time spent on page when user leaves or hides tab
   private trackPing() {
     const duration = Math.floor((Date.now() - this.startTime) / 1000);
-    if (duration < 1) return; // Ignore accidental bounces
+    if (duration < 1) return;
 
     const payload: Payload = {
       type: 'ping',
@@ -124,10 +136,8 @@ class SenzorWebAgent {
   }
 
   private send(data: Payload) {
-    // Use sendBeacon for reliability during unload, fallback to fetch
     if (navigator.sendBeacon) {
       const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
-      // sendBeacon returns false if it fails (e.g. payload too large)
       const success = navigator.sendBeacon(this.endpoint, blob);
       if (!success) this.fallbackSend(data);
     } else {
@@ -141,16 +151,16 @@ class SenzorWebAgent {
       body: JSON.stringify(data),
       keepalive: true,
       headers: { 'Content-Type': 'application/json' }
-    }).catch(err => console.error('[Senzor] Failed to send telemetry:', err));
+    }).catch(err => console.error('[Senzor] Telemetry Error:', err));
   }
 
   private setupListeners() {
-    // 1. History API Support (SPA - React/Next.js/Vue)
+    // SPA Support
     const originalPushState = history.pushState;
     history.pushState = (...args) => {
-      this.trackPing(); // Send duration for previous page
+      this.trackPing(); // End previous page
       originalPushState.apply(history, args);
-      this.trackPageView(); // Track new page
+      this.trackPageView(); // Start new page
     };
 
     window.addEventListener('popstate', () => {
@@ -158,27 +168,25 @@ class SenzorWebAgent {
       this.trackPageView();
     });
 
-    // 2. Visibility Change (Tab switch / Minimize)
+    // Visibility & Unload
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') {
         this.trackPing();
       } else {
-        // User came back, reset timer so we don't count background time
+        // User returned, restart timer (don't count background time)
         this.startTime = Date.now();
+        this.checkSession(); // Verify session hasn't expired while tab was hidden
       }
     });
 
-    // 3. Before Unload (Closing tab)
     window.addEventListener('beforeunload', () => {
       this.trackPing();
     });
   }
 }
 
-// Export Singleton
 export const Senzor = new SenzorWebAgent();
 
-// Allow window access for script tag usage
 if (typeof window !== 'undefined') {
   (window as any).Senzor = Senzor;
 }

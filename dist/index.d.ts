@@ -6,9 +6,10 @@ declare class SenzorWebAgent {
     private config;
     private startTime;
     private endpoint;
+    private initialized;
     constructor();
     init(config: Config): void;
-    private initSession;
+    private checkSession;
     private getIds;
     private trackPageView;
     private trackPing;
