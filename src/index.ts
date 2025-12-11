@@ -10,6 +10,7 @@ interface Payload {
   sessionId: string;
   url: string;
   path: string;
+  title: string;
   referrer: string;
   width: number;
   timezone: string;
@@ -56,50 +57,86 @@ class SenzorWebAgent {
       return;
     }
 
-    // 1. Manage Session State
-    this.checkSession();
-
-    // 2. Track initial load
+    this.manageSession();
     this.trackPageView();
-
-    // 3. Setup Listeners
     this.setupListeners();
   }
 
-  // --- Standard Analytics Session Logic ---
-  // A session ends after 30 minutes of inactivity.
-  private checkSession() {
+  // Helper to normalize referrer (strip protocol)
+  private normalizeUrl(url: string): string {
+    if (!url) return '';
+    return url.replace(/^https?:\/\//, '');
+  }
+
+  private manageSession() {
     const now = Date.now();
     const lastActivity = parseInt(localStorage.getItem('senzor_last_activity') || '0', 10);
     const sessionTimeout = 30 * 60 * 1000; // 30 mins
 
-    // 1. Visitor ID (Persistent 1 Year)
+    // Visitor ID (Persistent 1 Year)
     if (!localStorage.getItem('senzor_vid')) {
       localStorage.setItem('senzor_vid', generateUUID());
     }
 
-    // 2. Session ID
-    // Create new if missing OR expired
-    if (!localStorage.getItem('senzor_sid') || (now - lastActivity > sessionTimeout)) {
-      localStorage.setItem('senzor_sid', generateUUID());
+    // Session ID
+    let sessionId = sessionStorage.getItem('senzor_sid');
+    const isExpired = (now - lastActivity > sessionTimeout);
+
+    // Session logic
+    if (!sessionId || isExpired) {
+      sessionId = generateUUID();
+      sessionStorage.setItem('senzor_sid', sessionId);
+      this.determineReferrer(true);
+    } else {
+      // Ongoing session: Check if external source changed
+      this.determineReferrer(false);
     }
 
-    // Update Activity
     localStorage.setItem('senzor_last_activity', now.toString());
   }
 
+  private determineReferrer(isNewSession: boolean) {
+    const rawReferrer = document.referrer;
+    const currentHost = window.location.hostname;
+    let storedReferrer = sessionStorage.getItem('senzor_ref');
+
+    let isExternal = false;
+    if (rawReferrer) {
+      try {
+        const refUrl = new URL(rawReferrer);
+        // Compare hosts
+        if (refUrl.hostname !== currentHost) {
+          isExternal = true;
+        }
+      } catch (e) {
+        isExternal = true;
+      }
+    }
+
+    if (isExternal) {
+      // Always overwrite if it's a new external source
+      const cleanRef = this.normalizeUrl(rawReferrer);
+      // Only update if different to avoid redundant writes
+      if (cleanRef !== storedReferrer) {
+        sessionStorage.setItem('senzor_ref', cleanRef);
+      }
+    } else if (isNewSession && !storedReferrer) {
+      // New session with internal/no referrer = Direct
+      sessionStorage.setItem('senzor_ref', 'Direct');
+    }
+  }
+
   private getIds() {
-    // Refresh activity timestamp on every hit
     localStorage.setItem('senzor_last_activity', Date.now().toString());
     return {
       visitorId: localStorage.getItem('senzor_vid') || 'unknown',
-      sessionId: localStorage.getItem('senzor_sid') || 'unknown'
+      sessionId: sessionStorage.getItem('senzor_sid') || 'unknown',
+      referrer: sessionStorage.getItem('senzor_ref') || 'Direct'
     };
   }
 
   private trackPageView() {
-    // Ensure session is valid before tracking
-    this.checkSession();
+    this.manageSession();
     this.startTime = Date.now();
 
     const payload: Payload = {
@@ -108,9 +145,10 @@ class SenzorWebAgent {
       ...this.getIds(),
       url: window.location.href,
       path: window.location.pathname,
-      referrer: document.referrer,
+      title: document.title,
       width: window.innerWidth,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      referrer: this.getIds().referrer
     };
 
     this.send(payload);
@@ -126,9 +164,10 @@ class SenzorWebAgent {
       ...this.getIds(),
       url: window.location.href,
       path: window.location.pathname,
-      referrer: document.referrer,
+      title: document.title,
       width: window.innerWidth,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      referrer: this.getIds().referrer,
       duration: duration
     };
 
@@ -158,9 +197,9 @@ class SenzorWebAgent {
     // SPA Support
     const originalPushState = history.pushState;
     history.pushState = (...args) => {
-      this.trackPing(); // End previous page
+      this.trackPing();
       originalPushState.apply(history, args);
-      this.trackPageView(); // Start new page
+      this.trackPageView();
     };
 
     window.addEventListener('popstate', () => {
@@ -175,7 +214,7 @@ class SenzorWebAgent {
       } else {
         // User returned, restart timer (don't count background time)
         this.startTime = Date.now();
-        this.checkSession(); // Verify session hasn't expired while tab was hidden
+        this.manageSession();
       }
     });
 

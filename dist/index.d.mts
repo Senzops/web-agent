@@ -9,7 +9,9 @@ declare class SenzorWebAgent {
     private initialized;
     constructor();
     init(config: Config): void;
-    private checkSession;
+    private normalizeUrl;
+    private manageSession;
+    private determineReferrer;
     private getIds;
     private trackPageView;
     private trackPing;
