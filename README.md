@@ -19,7 +19,7 @@ yarn add @senzops/web
 Add this to the <head> of your website:
 
 ```html
-<script src="[https://cdn.jsdelivr.net/gh/senzops/web-agent/dist/index.global.js](https://cdn.jsdelivr.net/gh/senzops/web-agent/dist/index.global.js)"></script>
+<script src="https://cdn.jsdelivr.net/gh/senzops/web-agent/dist/index.global.js"></script>
 <script>
  // Opt-in to Web Analytics (Marketing/Product)
  window.Senzor.init({
@@ -54,7 +54,7 @@ export default function App({ Component, pageProps }) {
 
     // 2. Web APM / RUM (Core Web Vitals, Network Spans, JS Errors)
     Senzor.initRum({
-      apiKey: "rum\_987654321", // Get this from your Senzor Dashboard
+      apiKey: "rum_987654321", // Get this from your Senzor Dashboard
       sampleRate: 1.0, // Trace 100% of sessions (Adjust for high-traffic sites)
       allowedOrigins: ["https://api.mycompany.com"] // Inject W3C trace headers here
     });
