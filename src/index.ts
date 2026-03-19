@@ -486,12 +486,28 @@ class SenzorRumAgent {
     this.spans = [];
     this.errors = [];
     this.frustrations = { rageClicks: 0, deadClicks: 0, errorCount: 0 };
-    this.isInitialLoad = false; // Next flush on same page is an update, not initial load
+    this.isInitialLoad = false;
 
     if (payload.traces.length > 0 || payload.errors.length > 0) {
       const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
-      if (navigator.sendBeacon) navigator.sendBeacon(this.endpoint, blob);
-      else fetch(this.endpoint, { method: 'POST', body: blob, keepalive: true }).catch(() => { });
+
+      // FIX: Append API Key to URL because sendBeacon CANNOT send custom headers
+      const separator = this.endpoint.includes('?') ? '&' : '?';
+      const authUrl = `${this.endpoint}${separator}apiKey=${this.config.apiKey}`;
+
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(authUrl, blob);
+      } else {
+        // Fallback fetch: We pass both query param AND header for absolute redundancy
+        fetch(authUrl, {
+          method: 'POST',
+          body: blob,
+          keepalive: true,
+          headers: {
+            'x-service-api-key': this.config.apiKey
+          }
+        }).catch(() => { });
+      }
     }
   }
 }
