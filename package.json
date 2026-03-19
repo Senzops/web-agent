@@ -1,7 +1,7 @@
 {
   "name": "@senzops/web",
   "version": "1.2.0",
-  "description": "Senzor Web Analytics SDK",
+  "description": "Senzor Web Analytics and RUM SDK",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
