@@ -18,6 +18,7 @@ declare class SenzorAnalyticsAgent {
     private fallbackSend;
     private setupListeners;
 }
+
 interface RumConfig {
     apiKey: string;
     endpoint?: string;
@@ -53,6 +54,7 @@ declare class SenzorRumAgent {
     private setupRoutingListeners;
     private flush;
 }
+
 declare const Analytics: SenzorAnalyticsAgent;
 declare const RUM: SenzorRumAgent;
 declare const Senzor: {
@@ -60,4 +62,4 @@ declare const Senzor: {
     initRum: (config: RumConfig) => void;
 };
 
-export { Analytics, RUM, Senzor };
+export { Analytics, type AnalyticsConfig, RUM, type RumConfig, Senzor };
