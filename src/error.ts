@@ -8,7 +8,6 @@ export interface ErrorEngineDeps {
   frustrations: { rageClicks: number; deadClicks: number; errorCount: number };
   errorQueue: any[];
   flush: () => void;
-  getLastNetworkSpan?: () => any; // optional correlation hook
 }
 
 export class ErrorEngine {
@@ -31,19 +30,12 @@ export class ErrorEngine {
       (event: ErrorEvent | any) => {
         // JS runtime errors
         if (event.error) {
-          this.capture(event.error, "Uncaught Exception", {
-            file: event.filename,
-            line: event.lineno,
-            column: event.colno,
-          });
+          this.capture(event.error, "Uncaught Exception");
           return;
         } // Resource errors (script, css, img, font etc)
         if (event.target && event.target !== window) {
           const el: any = event.target;
-          this.capture(new Error("Resource failed to load"), "Resource Error", {
-            file: el?.src || el?.href || "unknown",
-            tag: el?.tagName,
-          });
+          this.capture(new Error("Resource failed to load"), "Resource Error");
         }
       },
       true,
@@ -59,30 +51,11 @@ export class ErrorEngine {
 
   private capture(errorObj: Error, type: string, extra?: any) {
     if (this.shouldIgnore(errorObj)) return;
-    this.deps.frustrations.errorCount++;
-    const topFrame = this.extractTopFrame(errorObj);
-    const lastInteraction = this.getLastUserInteraction();
-    let lastNetwork;
-    try {
-      lastNetwork = this.deps.getLastNetworkSpan
-        ? this.deps.getLastNetworkSpan()
-        : undefined;
-    } catch {
-      lastNetwork = undefined;
-    }
     const context = {
       type, // location
       path: location.pathname,
       referrer: document.referrer || undefined, // tracing
       traceId: this.deps.isSampled ? this.deps.traceId() : undefined,
-      sessionId: this.deps.sessionId, // source location
-      file: extra?.file || topFrame?.file,
-      line: extra?.line || topFrame?.line,
-      column: extra?.column || topFrame?.column,
-      topFrame, // correlations
-      lastInteraction,
-      lastNetworkSpan: lastNetwork, // UX
-      frustrations: { ...this.deps.frustrations }, // browser
       ...getBrowserContext(), // breadcrumbs
       breadcrumbs: [...this.deps.breadcrumbs],
     };
@@ -94,37 +67,6 @@ export class ErrorEngine {
       timestamp: new Date().toISOString(),
     });
     this.deps.flush();
-  }
-
-  // --- Stack intelligence ---
-  private extractTopFrame(error: Error) {
-    if (!error.stack) return undefined;
-    const lines = error.stack.split("\n");
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i];
-      const match = line.match(/\(?(.+):(\d+):(\d+)\)?/);
-      if (match) {
-        return {
-          file: match[1],
-          line: Number(match[2]),
-          column: Number(match[3]),
-          raw: line.trim(),
-        };
-      }
-    }
-    return undefined;
-  }
-
-  // --- User interaction intelligence ---
-  private getLastUserInteraction() {
-    if (!this.deps.breadcrumbs.length) return undefined;
-    for (let i = this.deps.breadcrumbs.length - 1; i >= 0; i--) {
-      const crumb = this.deps.breadcrumbs[i];
-      if (crumb.type === "click") {
-        return crumb;
-      }
-    }
-    return undefined;
   }
 
   private normalizeError(reason: any): Error {
