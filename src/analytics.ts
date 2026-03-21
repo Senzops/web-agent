@@ -28,46 +28,56 @@ export class SenzorAnalyticsAgent {
   }
 
   private normalizeUrl(url: string): string {
-    return url ? url.replace(/^https?:\/\//, '') : '';
+    return url ? url.replace(/^https?:\/\//, '').replace(/^www\./, '') : '';
   }
 
   private manageSession() {
     const now = Date.now();
-    const lastActivity = parseInt(localStorage.getItem('sz_wa_last') || '0', 10);
-    if (!localStorage.getItem('sz_wa_vid')) localStorage.setItem('sz_wa_vid', generateUUID());
+    const lastActivity = parseInt(localStorage.getItem('senzor_last_activity') || '0', 10);
+    const sessionTimeout = 30 * 60 * 1000; // 30 minutes
 
-    let sessionId = sessionStorage.getItem('sz_wa_sid');
-    if (!sessionId || (now - lastActivity > 30 * 60 * 1000)) {
+    if (!localStorage.getItem('senzor_vid')) localStorage.setItem('senzor_vid', generateUUID());
+
+    let sessionId = sessionStorage.getItem('senzor_sid');
+    const isExpired = (now - lastActivity > sessionTimeout);
+
+    if (!sessionId || isExpired) {
       sessionId = generateUUID();
-      sessionStorage.setItem('sz_wa_sid', sessionId);
+      sessionStorage.setItem('senzor_sid', sessionId);
       this.determineReferrer(true);
     } else {
       this.determineReferrer(false);
     }
-    localStorage.setItem('sz_wa_last', now.toString());
+    localStorage.setItem('senzor_last_activity', now.toString());
   }
 
   private determineReferrer(isNewSession: boolean) {
     const rawReferrer = document.referrer;
+    const currentHost = window.location.hostname;
+    let storedReferrer = sessionStorage.getItem('senzor_ref');
+
     let isExternal = false;
     if (rawReferrer) {
-      try { isExternal = new URL(rawReferrer).hostname !== window.location.hostname; } catch (e) { isExternal = true; }
+      try {
+        const refUrl = new URL(rawReferrer);
+        if (refUrl.hostname !== currentHost) isExternal = true;
+      } catch (e) { isExternal = true; }
     }
 
     if (isExternal) {
       const cleanRef = this.normalizeUrl(rawReferrer);
-      if (cleanRef !== sessionStorage.getItem('sz_wa_ref')) sessionStorage.setItem('sz_wa_ref', cleanRef);
-    } else if (isNewSession && !sessionStorage.getItem('sz_wa_ref')) {
-      sessionStorage.setItem('sz_wa_ref', 'Direct');
+      if (cleanRef !== storedReferrer) sessionStorage.setItem('senzor_ref', cleanRef);
+    } else if (isNewSession && !storedReferrer) {
+      sessionStorage.setItem('senzor_ref', 'Direct');
     }
   }
 
   private getIds() {
-    localStorage.setItem('sz_wa_last', Date.now().toString());
+    localStorage.setItem('senzor_last_activity', Date.now().toString());
     return {
-      visitorId: localStorage.getItem('sz_wa_vid') || 'unknown',
-      sessionId: sessionStorage.getItem('sz_wa_sid') || 'unknown',
-      referrer: sessionStorage.getItem('sz_wa_ref') || 'Direct'
+      visitorId: localStorage.getItem('senzor_vid') || 'unknown',
+      sessionId: sessionStorage.getItem('senzor_sid') || 'unknown',
+      referrer: sessionStorage.getItem('senzor_ref') || 'Direct'
     };
   }
 

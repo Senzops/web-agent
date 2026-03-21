@@ -4,7 +4,7 @@ import { SenzorRumAgent, RumConfig } from './rum';
 export const Analytics = new SenzorAnalyticsAgent();
 export const RUM = new SenzorRumAgent();
 
-// Maintain backwards compatibility for existing setup scripts
+// Maintain backwards compatibility
 export const Senzor = {
   init: (config: AnalyticsConfig) => Analytics.init(config),
   initRum: (config: RumConfig) => RUM.init(config)

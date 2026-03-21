@@ -34,13 +34,14 @@ declare class SenzorRumAgent {
     private traceId;
     private traceStartTime;
     private isInitialLoad;
-    private spans;
-    private errors;
-    private breadcrumbs;
+    private spanQueue;
+    private errorQueue;
     private vitals;
+    private breadcrumbs;
     private frustrations;
     private clickHistory;
     private flushInterval;
+    private readonly MAX_BATCH_SIZE;
     init(config: RumConfig): void;
     private manageSession;
     private startNewTrace;

@@ -1,4 +1,4 @@
-import { generateHex, generateUUID, getBrowserContext, getPayloadSize } from './utils';
+import { generateHex, generateUUID, getBrowserContext, getPayloadSize, extractHeaders } from './utils';
 
 export interface RumConfig {
   apiKey: string;
@@ -19,16 +19,16 @@ export class SenzorRumAgent {
   private traceStartTime: number = 0;
   private isInitialLoad: boolean = true;
 
-  // Buffers
-  private spans: any[] = [];
-  private errors: any[] = [];
-  private breadcrumbs: any[] = [];
+  // --- BATCHING QUEUES ---
+  private spanQueue: any[] = [];
+  private errorQueue: any[] = [];
   private vitals: any = {};
+  private breadcrumbs: any[] = [];
   private frustrations = { rageClicks: 0, deadClicks: 0, errorCount: 0 };
   private clickHistory: { x: number; y: number; time: number }[] = [];
 
-  // Intervals
   private flushInterval: any;
+  private readonly MAX_BATCH_SIZE = 50;
 
   public init(config: RumConfig) {
     if (this.initialized) return;
@@ -41,7 +41,6 @@ export class SenzorRumAgent {
       return;
     }
 
-    // Determine Sampling (Errors are ALWAYS 100% sampled, only Traces drop)
     this.isSampled = Math.random() <= (this.config.sampleRate ?? 1.0);
 
     this.manageSession();
@@ -52,10 +51,8 @@ export class SenzorRumAgent {
     this.setupUXListeners();
     if (this.isSampled) this.patchNetwork();
 
-    // Micro-batch flush every 10s
-    this.flushInterval = setInterval(() => this.flush(), 10000);
-
-    // SPA and Unload Listeners
+    // Background Worker: Flushes the queue every 5 seconds
+    this.flushInterval = setInterval(() => this.flush(), 5000);
     this.setupRoutingListeners();
   }
 
@@ -67,18 +64,16 @@ export class SenzorRumAgent {
   }
 
   private startNewTrace(isInitialLoad: boolean) {
-    this.traceId = generateHex(32); // W3C Standard Trace ID
+    this.traceId = generateHex(32);
     this.traceStartTime = Date.now();
     this.isInitialLoad = isInitialLoad;
-    this.spans = [];
     this.vitals = {};
     this.frustrations = { rageClicks: 0, deadClicks: 0, errorCount: 0 };
   }
 
-  // --- Breadcrumbs (For Error Context) ---
   private addBreadcrumb(type: string, message: string, data?: any) {
     this.breadcrumbs.push({ type, message, data, time: Date.now() });
-    if (this.breadcrumbs.length > 15) this.breadcrumbs.shift(); // Keep last 15 actions
+    if (this.breadcrumbs.length > 20) this.breadcrumbs.shift();
   }
 
   // --- 1. UX Frustration Detection ---
@@ -87,17 +82,12 @@ export class SenzorRumAgent {
       const target = e.target as HTMLElement;
       const tag = target.tagName ? target.tagName.toLowerCase() : '';
 
-      // Breadcrumb
       this.addBreadcrumb('click', `Clicked ${tag}${target.id ? '#' + target.id : ''}${target.className ? '.' + target.className.split(' ')[0] : ''}`);
 
-      // Dead Click Heuristic
       const interactiveElements = ['a', 'button', 'input', 'select', 'textarea', 'label'];
       const isInteractive = interactiveElements.includes(tag) || target.closest('button') || target.closest('a') || target.hasAttribute('role') || target.onclick;
-      if (!isInteractive) {
-        this.frustrations.deadClicks++;
-      }
+      if (!isInteractive) this.frustrations.deadClicks++;
 
-      // Rage Click Heuristic
       const now = Date.now();
       this.clickHistory.push({ x: e.clientX, y: e.clientY, time: now });
       this.clickHistory = this.clickHistory.filter(c => now - c.time < 1000);
@@ -113,7 +103,7 @@ export class SenzorRumAgent {
         if (isRage) {
           this.frustrations.rageClicks++;
           this.addBreadcrumb('frustration', 'Rage Click Detected');
-          this.clickHistory = []; // Reset
+          this.clickHistory = [];
         }
       }
     }, { capture: true, passive: true });
@@ -156,9 +146,7 @@ export class SenzorRumAgent {
         }
       }).observe({ type: 'event', buffered: true, durationThreshold: 40 } as any);
 
-    } catch (e) {
-      // Browser doesn't support specific observer type, degrade gracefully
-    }
+    } catch (e) { }
   }
 
   private getNavigationTimings() {
@@ -195,7 +183,7 @@ export class SenzorRumAgent {
     // --- Patch XHR ---
     const originalXhrOpen = XMLHttpRequest.prototype.open;
     const originalXhrSend = XMLHttpRequest.prototype.send;
-    const originalXhrSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+    const originalXhrSetReqHeader = XMLHttpRequest.prototype.setRequestHeader;
 
     XMLHttpRequest.prototype.open = function (method: string, url: string, ...rest: any[]) {
       (this as any).__szMethod = method.toUpperCase();
@@ -205,8 +193,9 @@ export class SenzorRumAgent {
     };
 
     XMLHttpRequest.prototype.setRequestHeader = function (header: string, value: string) {
+      if (!(this as any).__szHeaders) (this as any).__szHeaders = {};
       (this as any).__szHeaders[header] = value;
-      return originalXhrSetRequestHeader.call(this, header, value);
+      return originalXhrSetReqHeader.apply(this, [header, value]);
     };
 
     XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
@@ -216,9 +205,7 @@ export class SenzorRumAgent {
       const method = xhr.__szMethod;
       let fullUrl = xhr.__szUrl;
 
-      try {
-        fullUrl = new URL(xhr.__szUrl, window.location.origin).toString();
-      } catch (e) { /* ignore */ }
+      try { fullUrl = new URL(xhr.__szUrl, window.location.origin).toString(); } catch (e) { }
 
       if (self.shouldAttachTraceHeader(fullUrl)) {
         xhr.setRequestHeader('traceparent', `00-${self.traceId}-${spanId}-01`);
@@ -227,22 +214,37 @@ export class SenzorRumAgent {
       xhr.addEventListener('loadend', () => {
         const duration = (Date.now() - self.traceStartTime) - startTime;
 
-        // Capture Verbose Metadata for XHR
+        let responseHeaders = {};
+        try {
+          const rawHeaders = xhr.getAllResponseHeaders();
+          responseHeaders = rawHeaders.trim().split(/[\r\n]+/).reduce((acc: any, line: string) => {
+            const parts = line.split(': ');
+            const header = parts.shift();
+            const value = parts.join(': ');
+            if (header) acc[header] = value;
+            return acc;
+          }, {});
+        } catch (e) { }
+
         const meta: any = {
           url: fullUrl,
-          method: method,
+          method,
           library: 'xhr',
           status: xhr.status,
           responseType: xhr.responseType,
-          requestPayloadSize: getPayloadSize(body)
+          requestPayloadSize: getPayloadSize(body),
+          requestHeaders: xhr.__szHeaders,
+          responseHeaders
         };
 
         try {
-          const responseLength = xhr.responseText ? xhr.responseText.length : undefined;
-          if (responseLength) meta.responsePayloadSize = responseLength;
-        } catch (e) { /* Ignore responseText access errors on binary/blob */ }
+          if (xhr.responseType === '' || xhr.responseType === 'text') {
+            meta.responsePayloadSize = xhr.responseText?.length;
+          }
+        } catch (e) { }
 
-        self.spans.push({
+        // Queue Span
+        self.spanQueue.push({
           spanId,
           name: `${method} ${new URL(fullUrl, window.location.origin).pathname}`,
           type: 'http',
@@ -251,6 +253,8 @@ export class SenzorRumAgent {
           status: xhr.status,
           meta
         });
+
+        if (self.spanQueue.length >= self.MAX_BATCH_SIZE) self.flush();
       });
 
       return originalXhrSend.call(this, body);
@@ -279,7 +283,8 @@ export class SenzorRumAgent {
       const spanId = generateHex(16);
       const startTime = Date.now() - self.traceStartTime;
 
-      // Safely inject traceparent without breaking Streams
+      let reqHeadersObj = extractHeaders(init?.headers || (requestInfo instanceof Request ? requestInfo.headers : {}));
+
       if (self.shouldAttachTraceHeader(fullUrl)) {
         const traceHeader = `00-${self.traceId}-${spanId}-01`;
         if (requestInfo instanceof Request) {
@@ -291,50 +296,49 @@ export class SenzorRumAgent {
           currentHeaders.set('traceparent', traceHeader);
           args[1] = { ...(init || {}), headers: currentHeaders };
         }
+        reqHeadersObj['traceparent'] = traceHeader;
       }
+
+      const captureSpan = (status: number, response?: Response, errorMsg?: string) => {
+        const duration = (Date.now() - self.traceStartTime) - startTime;
+
+        const meta: any = {
+          url: fullUrl,
+          method,
+          library: 'fetch',
+          status,
+          requestPayloadSize: getPayloadSize(init?.body),
+          requestHeaders: reqHeadersObj,
+        };
+
+        if (response) {
+          meta.statusText = response.statusText;
+          meta.type = response.type;
+          meta.redirected = response.redirected;
+          meta.responseHeaders = extractHeaders(response.headers);
+        }
+
+        if (errorMsg) meta.error = errorMsg;
+
+        self.spanQueue.push({
+          spanId,
+          name: `${method} ${new URL(fullUrl, window.location.origin).pathname}`,
+          type: 'http',
+          startTime,
+          duration,
+          status,
+          meta
+        });
+
+        if (self.spanQueue.length >= self.MAX_BATCH_SIZE) self.flush();
+      };
 
       try {
         const response = await originalFetch.apply(this, args);
-        const duration = (Date.now() - self.traceStartTime) - startTime;
-
-        self.spans.push({
-          spanId,
-          name: `${method} ${new URL(fullUrl, window.location.origin).pathname}`,
-          type: 'http',
-          startTime,
-          duration,
-          status: response.status,
-          meta: {
-            url: fullUrl,
-            method,
-            library: 'fetch',
-            status: response.status,
-            statusText: response.statusText,
-            type: response.type,
-            redirected: response.redirected,
-            requestPayloadSize: getPayloadSize(init?.body)
-          }
-        });
+        captureSpan(response.status, response);
         return response;
       } catch (error) {
-        const duration = (Date.now() - self.traceStartTime) - startTime;
-
-        self.spans.push({
-          spanId,
-          name: `${method} ${new URL(fullUrl, window.location.origin).pathname}`,
-          type: 'http',
-          startTime,
-          duration,
-          status: 0,
-          meta: {
-            url: fullUrl,
-            method,
-            library: 'fetch',
-            status: 0,
-            error: error instanceof Error ? error.message : String(error),
-            requestPayloadSize: getPayloadSize(init?.body)
-          }
-        });
+        captureSpan(0, undefined, error instanceof Error ? error.message : String(error));
         throw error;
       }
     };
@@ -346,7 +350,7 @@ export class SenzorRumAgent {
       this.frustrations.errorCount++;
       const message = errorObj.message || String(errorObj);
 
-      this.errors.push({
+      this.errorQueue.push({
         errorClass: errorObj.name || 'Error',
         message: message,
         stackTrace: errorObj.stack || '',
@@ -354,11 +358,12 @@ export class SenzorRumAgent {
         context: {
           type,
           ...getBrowserContext(),
-          breadcrumbs: [...this.breadcrumbs] // Snapshot of actions leading up to crash
+          breadcrumbs: [...this.breadcrumbs]
         },
         timestamp: new Date().toISOString()
       });
-      this.flush(); // Flush immediately on error
+
+      this.flush(); // Flush immediately on critical error
     };
 
     window.addEventListener('error', (event) => {
@@ -374,7 +379,7 @@ export class SenzorRumAgent {
   private setupRoutingListeners() {
     const originalPushState = history.pushState;
     history.pushState = (...args) => {
-      this.flush(); // Flush previous page view
+      this.flush();
       originalPushState.apply(history, args);
       this.startNewTrace(false);
       this.addBreadcrumb('navigation', window.location.pathname);
@@ -394,9 +399,12 @@ export class SenzorRumAgent {
   }
 
   private flush() {
-    if (this.spans.length === 0 && this.errors.length === 0 && !this.isInitialLoad) return;
+    if (this.spanQueue.length === 0 && this.errorQueue.length === 0 && !this.isInitialLoad) return;
 
-    const payload: any = { traces: [], errors: this.errors };
+    const spansToSend = this.spanQueue.splice(0, this.MAX_BATCH_SIZE);
+    const errorsToSend = this.errorQueue.splice(0, 20);
+
+    const payload: any = { traces: [], errors: errorsToSend };
 
     if (this.isSampled) {
       payload.traces.push({
@@ -408,27 +416,22 @@ export class SenzorRumAgent {
         vitals: { ...this.vitals },
         timings: this.isInitialLoad ? this.getNavigationTimings() : {},
         frustration: { ...this.frustrations },
-        ...getBrowserContext(), // URL, UserAgent
-        spans: [...this.spans],
+        ...getBrowserContext(),
+        spans: spansToSend,
         duration: Date.now() - this.traceStartTime,
         timestamp: new Date(this.traceStartTime).toISOString()
       });
     }
 
-    // Reset Buffers
-    this.spans = [];
-    this.errors = [];
-    this.frustrations = { rageClicks: 0, deadClicks: 0, errorCount: 0 };
     this.isInitialLoad = false;
 
     if (payload.traces.length > 0 || payload.errors.length > 0) {
       const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
 
-      // Safely append API Key to URL for Beacon support
       const separator = this.endpoint.includes('?') ? '&' : '?';
       const authUrl = `${this.endpoint}${separator}apiKey=${this.config.apiKey}`;
 
-      if (navigator.sendBeacon) {
+      if (navigator.sendBeacon && blob.size < 60000) {
         navigator.sendBeacon(authUrl, blob);
       } else {
         fetch(authUrl, {
