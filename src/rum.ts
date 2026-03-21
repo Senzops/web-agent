@@ -30,7 +30,7 @@ export class SenzorRumAgent {
   private traceStartTime: number = 0;
   private isInitialLoad: boolean = true;
 
-  // --- BATCHING QUEUES ---
+  // --- BATCHING QUEUES & LIMITS ---
   private spanQueue: any[] = [];
   private errorQueue: any[] = [];
   private vitals: any = {};
@@ -39,7 +39,9 @@ export class SenzorRumAgent {
   private clickHistory: { x: number; y: number; time: number }[] = [];
 
   private flushInterval: any;
+  private flushTimeout: any = null; // Used for debouncing burst errors
   private readonly MAX_BATCH_SIZE = 50;
+  private readonly MAX_QUEUE_MEMORY = 500; // Prevent Out-of-Memory (OOM) crashes if offline
 
   private errorEngine!: ErrorEngine;
 
@@ -66,7 +68,8 @@ export class SenzorRumAgent {
       breadcrumbs: this.breadcrumbs,
       frustrations: this.frustrations,
       errorQueue: this.errorQueue,
-      flush: () => this.flush(),
+      queueLimit: this.MAX_QUEUE_MEMORY,
+      flush: () => this.debouncedFlush(),
     });
     this.errorEngine.setup();
 
@@ -126,6 +129,7 @@ export class SenzorRumAgent {
           target.closest("a") ||
           target.hasAttribute("role") ||
           target.onclick;
+
         if (!isInteractive) this.frustrations.deadClicks++;
 
         const now = Date.now();
@@ -221,7 +225,7 @@ export class SenzorRumAgent {
     };
   }
 
-  // --- 3. Distributed Tracing & Verbose Network Meta ---
+  // --- 3. Distributed Tracing & Network Patching ---
   private shouldAttachTraceHeader(url: string): boolean {
     if (!this.config.allowedOrigins || this.config.allowedOrigins.length === 0)
       return false;
@@ -236,6 +240,12 @@ export class SenzorRumAgent {
     } catch {
       return false;
     }
+  }
+
+  private pushSpan(span: any) {
+    if (this.spanQueue.length >= this.MAX_QUEUE_MEMORY) this.spanQueue.shift(); // Drop oldest to prevent OOM
+    this.spanQueue.push(span);
+    if (this.spanQueue.length >= this.MAX_BATCH_SIZE) this.debouncedFlush();
   }
 
   private patchNetwork() {
@@ -318,8 +328,7 @@ export class SenzorRumAgent {
           }
         } catch (e) {}
 
-        // Queue Span
-        self.spanQueue.push({
+        self.pushSpan({
           spanId,
           name: `${method} ${new URL(fullUrl, window.location.origin).pathname}`,
           type: "http",
@@ -328,8 +337,6 @@ export class SenzorRumAgent {
           status: xhr.status,
           meta,
         });
-
-        if (self.spanQueue.length >= self.MAX_BATCH_SIZE) self.flush();
       });
 
       return originalXhrSend.call(this, body);
@@ -404,7 +411,7 @@ export class SenzorRumAgent {
 
         if (errorMsg) meta.error = errorMsg;
 
-        self.spanQueue.push({
+        self.pushSpan({
           spanId,
           name: `${method} ${new URL(fullUrl, window.location.origin).pathname}`,
           type: "http",
@@ -413,8 +420,6 @@ export class SenzorRumAgent {
           status,
           meta,
         });
-
-        if (self.spanQueue.length >= self.MAX_BATCH_SIZE) self.flush();
       };
 
       try {
@@ -455,6 +460,11 @@ export class SenzorRumAgent {
     window.addEventListener("pagehide", () => this.flush());
   }
 
+  private debouncedFlush() {
+    if (this.flushTimeout) clearTimeout(this.flushTimeout);
+    this.flushTimeout = setTimeout(() => this.flush(), 100); // 100ms debounce to prevent network spam
+  }
+
   private flush() {
     if (
       this.spanQueue.length === 0 &&
@@ -463,6 +473,7 @@ export class SenzorRumAgent {
     )
       return;
 
+    // Drain Queue up to batch limit to ensure payload fits in Beacon API limits
     const spansToSend = this.spanQueue.splice(0, this.MAX_BATCH_SIZE);
     const errorsToSend = this.errorQueue.splice(0, 20);
 
@@ -496,6 +507,7 @@ export class SenzorRumAgent {
       const authUrl = `${this.endpoint}${separator}apiKey=${this.config.apiKey}`;
 
       if (navigator.sendBeacon && blob.size < 60000) {
+        // Safety check against 64k beacon limit
         navigator.sendBeacon(authUrl, blob);
       } else {
         fetch(authUrl, {

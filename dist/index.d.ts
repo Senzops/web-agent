@@ -41,7 +41,9 @@ declare class SenzorRumAgent {
     private frustrations;
     private clickHistory;
     private flushInterval;
+    private flushTimeout;
     private readonly MAX_BATCH_SIZE;
+    private readonly MAX_QUEUE_MEMORY;
     private errorEngine;
     init(config: RumConfig): void;
     private manageSession;
@@ -51,8 +53,10 @@ declare class SenzorRumAgent {
     private setupPerformanceObservers;
     private getNavigationTimings;
     private shouldAttachTraceHeader;
+    private pushSpan;
     private patchNetwork;
     private setupRoutingListeners;
+    private debouncedFlush;
     private flush;
 }
 
