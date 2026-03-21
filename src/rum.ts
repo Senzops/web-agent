@@ -67,6 +67,10 @@ export class SenzorRumAgent {
       frustrations: this.frustrations,
       errorQueue: this.errorQueue,
       flush: () => this.flush(),
+      getLastNetworkSpan: () =>
+        this.spanQueue?.length
+          ? this.spanQueue[this.spanQueue.length - 1]
+          : undefined,
     });
     this.errorEngine.setup();
 

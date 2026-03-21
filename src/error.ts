@@ -8,6 +8,7 @@ export interface ErrorEngineDeps {
   frustrations: { rageClicks: number; deadClicks: number; errorCount: number };
   errorQueue: any[];
   flush: () => void;
+  getLastNetworkSpan?: () => any; // optional correlation hook
 }
 
 export class ErrorEngine {
@@ -20,6 +21,8 @@ export class ErrorEngine {
   public setup() {
     this.setupGlobalErrors();
     this.setupPromiseErrors();
+    this.setupReactIntegration();
+    this.setupReactConsolePatch();
   }
 
   private setupGlobalErrors() {
@@ -57,24 +60,71 @@ export class ErrorEngine {
   private capture(errorObj: Error, type: string, extra?: any) {
     if (this.shouldIgnore(errorObj)) return;
     this.deps.frustrations.errorCount++;
+    const topFrame = this.extractTopFrame(errorObj);
+    const lastInteraction = this.getLastUserInteraction();
+    let lastNetwork;
+    try {
+      lastNetwork = this.deps.getLastNetworkSpan
+        ? this.deps.getLastNetworkSpan()
+        : undefined;
+    } catch {
+      lastNetwork = undefined;
+    }
+    const context = {
+      type, // location
+      path: location.pathname,
+      referrer: document.referrer || undefined, // tracing
+      traceId: this.deps.isSampled ? this.deps.traceId() : undefined,
+      sessionId: this.deps.sessionId, // source location
+      file: extra?.file || topFrame?.file,
+      line: extra?.line || topFrame?.line,
+      column: extra?.column || topFrame?.column,
+      topFrame, // correlations
+      lastInteraction,
+      lastNetworkSpan: lastNetwork, // UX
+      frustrations: { ...this.deps.frustrations }, // browser
+      ...getBrowserContext(), // breadcrumbs
+      breadcrumbs: [...this.deps.breadcrumbs],
+    };
     this.deps.errorQueue.push({
       errorClass: errorObj.name || "Error",
       message: errorObj.message || String(errorObj),
       stackTrace: errorObj.stack || "",
-      file: extra?.file,
-      line: extra?.line,
-      column: extra?.column,
-      traceId: this.deps.isSampled ? this.deps.traceId() : undefined,
-      context: {
-        type,
-        path: location.pathname,
-        sessionId: this.deps.sessionId,
-        ...getBrowserContext(),
-        breadcrumbs: [...this.deps.breadcrumbs],
-      },
+      context,
       timestamp: new Date().toISOString(),
     });
     this.deps.flush();
+  }
+
+  // --- Stack intelligence ---
+  private extractTopFrame(error: Error) {
+    if (!error.stack) return undefined;
+    const lines = error.stack.split("\n");
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+      const match = line.match(/\(?(.+):(\d+):(\d+)\)?/);
+      if (match) {
+        return {
+          file: match[1],
+          line: Number(match[2]),
+          column: Number(match[3]),
+          raw: line.trim(),
+        };
+      }
+    }
+    return undefined;
+  }
+
+  // --- User interaction intelligence ---
+  private getLastUserInteraction() {
+    if (!this.deps.breadcrumbs.length) return undefined;
+    for (let i = this.deps.breadcrumbs.length - 1; i >= 0; i--) {
+      const crumb = this.deps.breadcrumbs[i];
+      if (crumb.type === "click") {
+        return crumb;
+      }
+    }
+    return undefined;
   }
 
   private normalizeError(reason: any): Error {
@@ -94,5 +144,57 @@ export class ErrorEngine {
     if (stack.includes("moz-extension://")) return true;
     if (stack.includes("safari-extension://")) return true;
     return false;
+  }
+
+  private setupReactIntegration() {
+    const hook = (window as any).__REACT_DEVTOOLS_GLOBAL_HOOK__;
+    if (!hook) return;
+    // Prevent multiple patches
+    if (hook.__senzor_patched) return;
+    hook.__senzor_patched = true;
+    const orig = hook.onCommitFiberRoot;
+    hook.onCommitFiberRoot = (id: any, root: any, ...rest: any[]) => {
+      try {
+        // We don't depend on React internals.
+        // Only detecting React presence safely.
+      } catch {}
+      if (orig) {
+        return orig.apply(hook, [id, root, ...rest]);
+      }
+    };
+  }
+
+  private setupReactConsolePatch() {
+    const consoleAny: any = console;
+    // Prevent multiple patches
+    if (consoleAny.__senzor_react_patch) return;
+    consoleAny.__senzor_react_patch = true;
+    const original = console.error;
+    // Prevent duplicate React StrictMode errors
+    let lastReactError = "";
+    let lastReactErrorTime = 0;
+    console.error = (...args: any[]) => {
+      try {
+        if (!args || !args.length) return original.apply(console, args);
+        const first = args[0];
+        // React component crash pattern
+        if (typeof first === "string") {
+          if (first.includes("The above error occurred")) {
+            const now = Date.now();
+            // Prevent duplicates (React strict mode)
+            if (first === lastReactError && now - lastReactErrorTime < 2000) {
+              return original.apply(console, args);
+            }
+            lastReactError = first;
+            lastReactErrorTime = now;
+            const error = new Error("React component crash");
+            this.capture(error, "React Error");
+          }
+        }
+      } catch {
+        // Never break console
+      }
+      return original.apply(console, args);
+    };
   }
 }
