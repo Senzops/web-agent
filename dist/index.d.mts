@@ -24,6 +24,7 @@ interface RumConfig {
     endpoint?: string;
     sampleRate?: number;
     allowedOrigins?: (string | RegExp)[];
+    autoLogs?: boolean;
 }
 declare class SenzorRumAgent {
     private config;
@@ -36,6 +37,7 @@ declare class SenzorRumAgent {
     private isInitialLoad;
     private spanQueue;
     private errorQueue;
+    private logQueue;
     private vitals;
     private breadcrumbs;
     private frustrations;
@@ -46,6 +48,7 @@ declare class SenzorRumAgent {
     private readonly MAX_QUEUE_MEMORY;
     private errorEngine;
     init(config: RumConfig): void;
+    private setupLogInterception;
     private manageSession;
     private startNewTrace;
     private addBreadcrumb;
