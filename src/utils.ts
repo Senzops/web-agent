@@ -50,3 +50,21 @@ export const extractHeaders = (headers: any): Record<string, string> => {
   }
   return result;
 };
+
+// NEW: DOM-Aware, Memory-safe JSON stringifier
+// Prevents the browser from crashing when devs accidentally `console.log(document.body)`
+export const safeStringify = (obj: any): string => {
+  const cache = new Set();
+  return JSON.stringify(obj, (key, value) => {
+    if (typeof value === 'object' && value !== null) {
+      // Browser specific safe-guards to prevent traversing massive native objects
+      if (typeof window !== 'undefined' && value instanceof Window) return '[Window]';
+      if (typeof Document !== 'undefined' && value instanceof Document) return '[Document]';
+      if (typeof Node !== 'undefined' && value instanceof Node) return `[Node: ${(value as any).nodeName}]`;
+
+      if (cache.has(value)) return '[Circular]';
+      cache.add(value);
+    }
+    return value;
+  });
+};
