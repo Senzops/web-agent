@@ -336,10 +336,10 @@ export class SenzorRumAgent {
         let responseHeaders = {};
         try {
           const rawHeaders = xhr.getAllResponseHeaders();
-          responseHeaders = rawHeaders.trim().split(/[\r\n]+/).reduce((acc: any, line: string) => {
-            const parts = line.split(": ");
-            const header = parts.shift();
-            const value = parts.join(": ");
+          responseHeaders = rawHeaders?.trim()?.split(/[\r\n]+/)?.reduce((acc: any, line: string) => {
+            const parts = line?.split(": ");
+            const header = parts?.shift();
+            const value = parts?.join(": ");
             if (header) acc[header] = value;
             return acc;
           }, {});
