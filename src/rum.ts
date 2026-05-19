@@ -50,6 +50,29 @@ export class SenzorRumAgent {
 
   private errorEngine!: ErrorEngine;
 
+  /**
+   * Enterprise Custom Span API
+   */
+  public startSpan(name: string, meta?: Record<string, any>) {
+    const spanId = generateHex(16);
+    const startTime = Date.now() - this.traceStartTime;
+
+    return {
+      end: (endMeta?: Record<string, any>) => {
+        const duration = Date.now() - this.traceStartTime - startTime;
+        this.pushSpan({
+          spanId,
+          name,
+          type: "custom",
+          startTime,
+          duration,
+          status: 200, // Success by default for custom spans
+          meta: { ...meta, ...endMeta },
+        });
+      },
+    };
+  }
+
   public init(config: RumConfig) {
     if (this.initialized) return;
     this.initialized = true;
@@ -193,6 +216,9 @@ export class SenzorRumAgent {
       const target = e.target as HTMLElement;
       const tag = target.tagName ? target.tagName.toLowerCase() : "";
 
+      const clickSpanId = generateHex(16);
+      const clickStartTime = Date.now() - this.traceStartTime;
+
       this.addBreadcrumb(
         "click",
         `Clicked ${tag}${target.id ? "#" + target.id : ""}${target.className ? "." + target.className?.split(" ")?.[0] : ""}`
@@ -226,6 +252,22 @@ export class SenzorRumAgent {
           this.clickHistory = [];
         }
       }
+
+      // Push Interaction Span
+      this.pushSpan({
+        spanId: clickSpanId,
+        name: `Click: ${tag}${target.id ? "#" + target.id : ""}`,
+        type: "interaction",
+        startTime: clickStartTime,
+        duration: Date.now() - this.traceStartTime - clickStartTime,
+        status: 200,
+        meta: {
+          tag,
+          id: target.id,
+          classes: target.className,
+          isInteractive,
+        },
+      });
     }, { capture: true, passive: true });
   }
 
@@ -263,7 +305,80 @@ export class SenzorRumAgent {
           }
         }
       }).observe({ type: "event", buffered: true, durationThreshold: 40 } as any);
+
+      // --- Enterprise: Resource Timing ---
+      new PerformanceObserver((entryList) => {
+        for (const entry of entryList.getEntries() as PerformanceResourceTiming[]) {
+          // Filter out our own ingestion calls to prevent feedback loops
+          if (entry.name.includes(this.endpoint)) continue;
+
+          this.pushSpan({
+            spanId: generateHex(16),
+            name: `Resource: ${entry.name.split("/").pop() || entry.name}`,
+            type: "resource",
+            startTime: entry.startTime,
+            duration: entry.duration,
+            status: 200, // Resources don't easily expose status code in PT
+            meta: {
+              url: entry.name,
+              initiatorType: entry.initiatorType,
+              nextHopProtocol: entry.nextHopProtocol,
+              decodedBodySize: entry.decodedBodySize,
+              encodedBodySize: entry.encodedBodySize,
+              transferSize: entry.transferSize,
+              cacheHit: entry.transferSize === 0 || (entry.transferSize > 0 && entry.transferSize < entry.encodedBodySize),
+            },
+          });
+        }
+      }).observe({ type: "resource", buffered: true });
+
+      // --- Enterprise: Long Task Monitoring ---
+      new PerformanceObserver((entryList) => {
+        for (const entry of entryList.getEntries()) {
+          this.pushSpan({
+            spanId: generateHex(16),
+            name: "Long Task (Main Thread Blocked)",
+            type: "longtask",
+            startTime: entry.startTime,
+            duration: entry.duration,
+            status: 500, // Mark as "error-ish" since it blocks UI
+            meta: {
+              attribution: (entry as any).attribution?.[0]?.name || "unknown",
+              containerType: (entry as any).attribution?.[0]?.containerType || "unknown",
+            },
+          });
+        }
+      }).observe({ type: "longtask" });
     } catch (e) {}
+  }
+
+  private captureNavigationSpans() {
+    if (typeof performance === "undefined") return;
+    const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming;
+    if (!nav) return;
+
+    const stages = [
+      { name: "DNS Lookup", start: nav.domainLookupStart, end: nav.domainLookupEnd, type: "dns" },
+      { name: "TCP Connection", start: nav.connectStart, end: nav.connectEnd, type: "tcp" },
+      { name: "SSL Negotiation", start: nav.secureConnectionStart, end: nav.connectEnd, type: "ssl" },
+      { name: "TTFB (Wait)", start: nav.requestStart, end: nav.responseStart, type: "ttfb" },
+      { name: "DOM Interactive", start: nav.responseEnd, end: nav.domInteractive, type: "dom" },
+      { name: "DOM Complete", start: nav.domInteractive, end: nav.domComplete, type: "dom" },
+    ];
+
+    stages.forEach((s) => {
+      if (s.end > s.start && s.start > 0) {
+        this.pushSpan({
+          spanId: generateHex(16),
+          name: s.name,
+          type: "navigation_stage",
+          startTime: s.start,
+          duration: s.end - s.start,
+          status: 200,
+          meta: { stage: s.type },
+        });
+      }
+    });
   }
 
   private getNavigationTimings() {
@@ -483,7 +598,28 @@ export class SenzorRumAgent {
     });
 
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "hidden") this.flush();
+      if (document.visibilityState === "hidden") {
+        this.pushSpan({
+          spanId: generateHex(16),
+          name: "App Backgrounded",
+          type: "visibility",
+          startTime: Date.now() - this.traceStartTime,
+          duration: 0,
+          status: 200,
+          meta: { state: "hidden" },
+        });
+        this.flush();
+      } else {
+        this.pushSpan({
+          spanId: generateHex(16),
+          name: "App Foregrounded",
+          type: "visibility",
+          startTime: Date.now() - this.traceStartTime,
+          duration: 0,
+          status: 200,
+          meta: { state: "visible" },
+        });
+      }
     });
 
     window.addEventListener("pagehide", () => this.flush());
@@ -509,6 +645,10 @@ export class SenzorRumAgent {
     const payload: any = { traces: [], errors: errorsToSend, logs: logsToSend };
 
     if (this.isSampled) {
+      if (this.isInitialLoad) {
+        this.captureNavigationSpans();
+      }
+
       payload.traces.push({
         traceId: this.traceId,
         sessionId: this.sessionId,

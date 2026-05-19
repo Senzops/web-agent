@@ -7,7 +7,8 @@ export const RUM = new SenzorRumAgent();
 // Maintain backwards compatibility
 export const Senzor = {
   init: (config: AnalyticsConfig) => Analytics.init(config),
-  initRum: (config: RumConfig) => RUM.init(config)
+  initRum: (config: RumConfig) => RUM.init(config),
+  startSpan: (name: string, meta?: Record<string, any>) => RUM.startSpan(name, meta)
 };
 
 // Auto-attach to window for script tag users

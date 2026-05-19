@@ -48,6 +48,12 @@ declare class SenzorRumAgent {
     private readonly MAX_BATCH_SIZE;
     private readonly MAX_QUEUE_MEMORY;
     private errorEngine;
+    /**
+     * Enterprise Custom Span API
+     */
+    startSpan(name: string, meta?: Record<string, any>): {
+        end: (endMeta?: Record<string, any>) => void;
+    };
     init(config: RumConfig): void;
     private setupLogInterception;
     private manageSession;
@@ -55,6 +61,7 @@ declare class SenzorRumAgent {
     private addBreadcrumb;
     private setupUXListeners;
     private setupPerformanceObservers;
+    private captureNavigationSpans;
     private getNavigationTimings;
     private shouldAttachTraceHeader;
     private pushSpan;
@@ -69,6 +76,9 @@ declare const RUM: SenzorRumAgent;
 declare const Senzor: {
     init: (config: AnalyticsConfig) => void;
     initRum: (config: RumConfig) => void;
+    startSpan: (name: string, meta?: Record<string, any>) => {
+        end: (endMeta?: Record<string, any>) => void;
+    };
 };
 
 export { Analytics, type AnalyticsConfig, RUM, type RumConfig, Senzor };
