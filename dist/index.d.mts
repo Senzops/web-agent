@@ -35,6 +35,7 @@ declare class SenzorRumAgent {
     private traceId;
     private traceStartTime;
     private isInitialLoad;
+    private isFirstFlushOfTrace;
     private spanQueue;
     private errorQueue;
     private logQueue;
