@@ -1,4 +1,4 @@
-import { generateUUID } from './utils';
+import { generateUUID, safeStringify } from './utils';
 
 export interface AnalyticsConfig {
   webId: string;
@@ -22,9 +22,13 @@ export class SenzorAnalyticsAgent {
       return;
     }
 
-    this.manageSession();
-    this.trackPageView();
-    this.setupListeners();
+    try {
+      this.manageSession();
+      this.trackPageView();
+      this.setupListeners();
+    } catch (e) {
+      // Non-blocking
+    }
   }
 
   private normalizeUrl(url: string): string {
@@ -82,26 +86,11 @@ export class SenzorAnalyticsAgent {
   }
 
   private trackPageView() {
-    this.manageSession();
-    this.startTime = Date.now();
-    this.send({
-      type: 'pageview',
-      webId: this.config.webId,
-      ...this.getIds(),
-      url: window.location.href,
-      path: window.location.pathname,
-      title: document.title,
-      width: window.innerWidth,
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      referrer: this.getIds().referrer
-    });
-  }
-
-  private trackPing() {
-    const duration = Math.floor((Date.now() - this.startTime) / 1000);
-    if (duration >= 1) {
+    try {
+      this.manageSession();
+      this.startTime = Date.now();
       this.send({
-        type: 'ping',
+        type: 'pageview',
         webId: this.config.webId,
         ...this.getIds(),
         url: window.location.href,
@@ -109,26 +98,48 @@ export class SenzorAnalyticsAgent {
         title: document.title,
         width: window.innerWidth,
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        referrer: this.getIds().referrer,
-        duration
+        referrer: this.getIds().referrer
       });
-    }
+    } catch (e) {}
+  }
+
+  private trackPing() {
+    try {
+      const duration = Math.floor((Date.now() - this.startTime) / 1000);
+      if (duration >= 1) {
+        this.send({
+          type: 'ping',
+          webId: this.config.webId,
+          ...this.getIds(),
+          url: window.location.href,
+          path: window.location.pathname,
+          title: document.title,
+          width: window.innerWidth,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          referrer: this.getIds().referrer,
+          duration
+        });
+      }
+    } catch (e) {}
   }
 
   private send(data: any) {
-    if (navigator.sendBeacon) {
-      if (!navigator.sendBeacon(this.endpoint, new Blob([JSON.stringify(data)], { type: 'application/json' }))) {
-        this.fallbackSend(data);
+    try {
+      const payload = safeStringify(data);
+      if (navigator.sendBeacon) {
+        if (!navigator.sendBeacon(this.endpoint, new Blob([payload], { type: 'application/json' }))) {
+          this.fallbackSend(payload);
+        }
+      } else {
+        this.fallbackSend(payload);
       }
-    } else {
-      this.fallbackSend(data);
-    }
+    } catch (e) {}
   }
 
-  private fallbackSend(data: any) {
+  private fallbackSend(payload: string) {
     fetch(this.endpoint, {
       method: 'POST',
-      body: JSON.stringify(data),
+      body: payload,
       keepalive: true,
       headers: { 'Content-Type': 'application/json' }
     }).catch(() => { });
@@ -136,23 +147,34 @@ export class SenzorAnalyticsAgent {
 
   private setupListeners() {
     const originalPushState = history.pushState;
-    history.pushState = (...args) => {
-      this.trackPing();
-      originalPushState.apply(history, args);
-      this.trackPageView();
-    };
+    if (typeof originalPushState === 'function') {
+      history.pushState = (...args) => {
+        try { this.trackPing(); } catch (e) {}
+        const result = originalPushState.apply(history, args);
+        try { this.trackPageView(); } catch (e) {}
+        return result;
+      };
+    }
+
     window.addEventListener('popstate', () => {
-      this.trackPing();
-      this.trackPageView();
-    });
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') {
+      try {
         this.trackPing();
-      } else {
-        this.startTime = Date.now();
-        this.manageSession();
-      }
+        this.trackPageView();
+      } catch (e) {}
     });
-    window.addEventListener('beforeunload', () => this.trackPing());
+
+    document.addEventListener('visibilitychange', () => {
+      try {
+        if (document.visibilityState === 'hidden') {
+          this.trackPing();
+        } else {
+          this.startTime = Date.now();
+          this.manageSession();
+        }
+      } catch (e) {}
+    });
+    window.addEventListener('beforeunload', () => {
+      try { this.trackPing(); } catch (e) {}
+    });
   }
 }

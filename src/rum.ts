@@ -213,61 +213,66 @@ export class SenzorRumAgent {
 
   private setupUXListeners() {
     document.addEventListener("click", (e) => {
-      const target = e.target as HTMLElement;
-      const tag = target.tagName ? target.tagName.toLowerCase() : "";
+      try {
+        const target = e.target as HTMLElement;
+        if (!target) return;
+        const tag = target.tagName ? target.tagName.toLowerCase() : "";
 
-      const clickSpanId = generateHex(16);
-      const clickStartTime = Date.now() - this.traceStartTime;
+        const clickSpanId = generateHex(16);
+        const clickStartTime = Date.now() - this.traceStartTime;
 
-      this.addBreadcrumb(
-        "click",
-        `Clicked ${tag}${target.id ? "#" + target.id : ""}${target.className ? "." + target.className?.split(" ")?.[0] : ""}`
-      );
+        this.addBreadcrumb(
+          "click",
+          `Clicked ${tag}${target.id ? "#" + target.id : ""}${target.className && typeof target.className === 'string' ? "." + target.className?.split(" ")?.[0] : ""}`
+        );
 
-      const interactiveElements = ["a", "button", "input", "select", "textarea", "label"];
-      const isInteractive =
-        interactiveElements.includes(tag) ||
-        target.closest("button") ||
-        target.closest("a") ||
-        target.hasAttribute("role") ||
-        target.onclick;
-        
-      if (!isInteractive) this.frustrations.deadClicks++;
+        const interactiveElements = ["a", "button", "input", "select", "textarea", "label"];
+        const isInteractive =
+          interactiveElements.includes(tag) ||
+          target.closest("button") ||
+          target.closest("a") ||
+          target.hasAttribute("role") ||
+          target.onclick;
+          
+        if (!isInteractive) this.frustrations.deadClicks++;
 
-      const now = Date.now();
-      this.clickHistory.push({ x: e.clientX, y: e.clientY, time: now });
-      this.clickHistory = this.clickHistory.filter((c) => now - c.time < 1000);
+        const now = Date.now();
+        this.clickHistory.push({ x: e.clientX, y: e.clientY, time: now });
+        this.clickHistory = this.clickHistory.filter((c) => now - c.time < 1000);
 
-      if (this.clickHistory.length >= 3) {
-        const first = this.clickHistory[0];
-        let isRage = true;
-        for (let i = 1; i < this.clickHistory.length; i++) {
-          const dx = Math.abs(this.clickHistory[i].x - first.x);
-          const dy = Math.abs(this.clickHistory[i].y - first.y);
-          if (dx > 50 || dy > 50) isRage = false;
+        if (this.clickHistory.length >= 3) {
+          const first = this.clickHistory[0];
+          let isRage = true;
+          for (let i = 1; i < this.clickHistory.length; i++) {
+            const dx = Math.abs(this.clickHistory[i].x - first.x);
+            const dy = Math.abs(this.clickHistory[i].y - first.y);
+            if (dx > 50 || dy > 50) isRage = false;
+          }
+          if (isRage) {
+            this.frustrations.rageClicks++;
+            this.addBreadcrumb("frustration", "Rage Click Detected");
+            this.clickHistory = [];
+          }
         }
-        if (isRage) {
-          this.frustrations.rageClicks++;
-          this.addBreadcrumb("frustration", "Rage Click Detected");
-          this.clickHistory = [];
-        }
+
+        // Push Interaction Span
+        this.pushSpan({
+          spanId: clickSpanId,
+          name: `Click: ${tag}${target.id ? "#" + target.id : ""}`,
+          type: "interaction",
+          startTime: clickStartTime,
+          duration: Date.now() - this.traceStartTime - clickStartTime,
+          status: 200,
+          meta: {
+            tag,
+            id: target.id,
+            classes: typeof target.className === 'string' ? target.className : '',
+            isInteractive,
+          },
+        });
+      } catch (e) {
+        // Never block user clicks
       }
-
-      // Push Interaction Span
-      this.pushSpan({
-        spanId: clickSpanId,
-        name: `Click: ${tag}${target.id ? "#" + target.id : ""}`,
-        type: "interaction",
-        startTime: clickStartTime,
-        duration: Date.now() - this.traceStartTime - clickStartTime,
-        status: 200,
-        meta: {
-          tag,
-          id: target.id,
-          classes: target.className,
-          isInteractive,
-        },
-      });
     }, { capture: true, passive: true });
   }
 
@@ -422,153 +427,172 @@ export class SenzorRumAgent {
     const originalXhrSetReqHeader = XMLHttpRequest.prototype.setRequestHeader;
 
     XMLHttpRequest.prototype.open = function (method: string, url: string, ...rest: any[]) {
-      (this as any).__szMethod = method.toUpperCase();
-      (this as any).__szUrl = url;
-      (this as any).__szHeaders = {};
+      try {
+        (this as any).__szMethod = method.toUpperCase();
+        (this as any).__szUrl = url;
+        (this as any).__szHeaders = {};
+      } catch (e) {}
       return originalXhrOpen.apply(this, [method, url, ...rest] as any);
     };
 
     XMLHttpRequest.prototype.setRequestHeader = function (header: string, value: string) {
-      if (!(this as any).__szHeaders) (this as any).__szHeaders = {};
-      (this as any).__szHeaders[header] = value;
+      try {
+        if (!(this as any).__szHeaders) (this as any).__szHeaders = {};
+        (this as any).__szHeaders[header] = value;
+      } catch (e) {}
       return originalXhrSetReqHeader.apply(this, [header, value]);
     };
 
     XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
       const xhr = this as any;
-      const spanId = generateHex(16);
-      const startTime = Date.now() - self.traceStartTime;
-      const method = xhr.__szMethod;
-      let fullUrl = xhr.__szUrl;
+      let spanId: string | undefined;
+      let startTime: number | undefined;
+      let method: string | undefined;
+      let fullUrl: string | undefined;
 
-      try { fullUrl = new URL(xhr.__szUrl, window.location.origin).toString(); } catch (e) {}
+      try {
+        spanId = generateHex(16);
+        startTime = Date.now() - self.traceStartTime;
+        method = xhr.__szMethod;
+        fullUrl = xhr.__szUrl;
 
-      if (fullUrl.includes(self.endpoint)) {
-        return originalXhrSend.call(this, body);
-      }
+        try { fullUrl = new URL(xhr.__szUrl, window.location.origin).toString(); } catch (e) {}
 
-      if (self.shouldAttachTraceHeader(fullUrl)) {
-        xhr.setRequestHeader("traceparent", `00-${self.traceId}-${spanId}-01`);
-      }
+        if (fullUrl && fullUrl.includes(self.endpoint)) {
+          return originalXhrSend.call(this, body);
+        }
 
-      xhr.addEventListener("loadend", () => {
-        const duration = Date.now() - self.traceStartTime - startTime;
+        if (fullUrl && self.shouldAttachTraceHeader(fullUrl)) {
+          xhr.setRequestHeader("traceparent", `00-${self.traceId}-${spanId}-01`);
+        }
 
-        let responseHeaders = {};
-        try {
-          const rawHeaders = xhr.getAllResponseHeaders();
-          responseHeaders = rawHeaders?.trim()?.split(/[\r\n]+/)?.reduce((acc: any, line: string) => {
-            const parts = line?.split(": ");
-            const header = parts?.shift();
-            const value = parts?.join(": ");
-            if (header) acc[header] = value;
-            return acc;
-          }, {});
-        } catch (e) {}
+        xhr.addEventListener("loadend", () => {
+          try {
+            const duration = Date.now() - self.traceStartTime - (startTime || 0);
 
-        const meta: any = {
-          url: fullUrl,
-          method,
-          library: "xhr",
-          status: xhr.status,
-          responseType: xhr.responseType,
-          requestPayloadSize: getPayloadSize(body),
-          requestHeaders: xhr.__szHeaders,
-          responseHeaders,
-        };
+            let responseHeaders = {};
+            try {
+              const rawHeaders = xhr.getAllResponseHeaders();
+              responseHeaders = rawHeaders?.trim()?.split(/[\r\n]+/)?.reduce((acc: any, line: string) => {
+                const parts = line?.split(": ");
+                const header = parts?.shift();
+                const value = parts?.join(": ");
+                if (header) acc[header] = value;
+                return acc;
+              }, {});
+            } catch (e) {}
 
-        try {
-          if (xhr.responseType === "" || xhr.responseType === "text") {
-            meta.responsePayloadSize = xhr.responseText?.length;
-          }
-        } catch (e) {}
+            const meta: any = {
+              url: fullUrl,
+              method,
+              library: "xhr",
+              status: xhr.status,
+              responseType: xhr.responseType,
+              requestPayloadSize: getPayloadSize(body),
+              requestHeaders: xhr.__szHeaders,
+              responseHeaders,
+            };
 
-        self.pushSpan({
-          spanId,
-          name: `${method} ${new URL(fullUrl, window.location.origin).pathname}`,
-          type: "http",
-          startTime,
-          duration,
-          status: xhr.status,
-          meta,
+            try {
+              if (xhr.responseType === "" || xhr.responseType === "text") {
+                meta.responsePayloadSize = xhr.responseText?.length;
+              }
+            } catch (e) {}
+
+            self.pushSpan({
+              spanId,
+              name: `${method} ${fullUrl ? new URL(fullUrl, window.location.origin).pathname : 'unknown'}`,
+              type: "http",
+              startTime,
+              duration,
+              status: xhr.status,
+              meta,
+            });
+          } catch (e) {}
         });
-      });
+      } catch (e) {}
 
       return originalXhrSend.call(this, body);
     };
 
     const originalFetch = window.fetch;
     window.fetch = async function (...args) {
-      const requestInfo = args[0];
-      const init = args[1];
-
-      let url = "";
+      let fullUrl = "";
       let method = "GET";
+      let spanId: string | undefined;
+      let startTime: number | undefined;
+      let reqHeadersObj: any = {};
 
-      if (typeof requestInfo === "string" || requestInfo instanceof URL) {
-        url = requestInfo.toString();
-        method = (init?.method || "GET").toUpperCase();
-      } else if (requestInfo instanceof Request) {
-        url = requestInfo.url;
-        method = requestInfo.method.toUpperCase();
-      }
+      try {
+        const requestInfo = args[0];
+        const init = args[1];
 
-      let fullUrl = url;
-      try { fullUrl = new URL(url, window.location.origin).toString(); } catch (e) {}
-
-      if (fullUrl.includes(self.endpoint)) {
-        return originalFetch.apply(this, args);
-      }
-
-      const spanId = generateHex(16);
-      const startTime = Date.now() - self.traceStartTime;
-
-      let reqHeadersObj = extractHeaders(init?.headers || (requestInfo instanceof Request ? requestInfo.headers : {}));
-
-      if (self.shouldAttachTraceHeader(fullUrl)) {
-        const traceHeader = `00-${self.traceId}-${spanId}-01`;
-        if (requestInfo instanceof Request) {
-          const currentHeaders = new Headers(requestInfo.headers);
-          currentHeaders.set("traceparent", traceHeader);
-          args[1] = { ...(init || {}), headers: currentHeaders };
-        } else {
-          const currentHeaders = new Headers(init?.headers || {});
-          currentHeaders.set("traceparent", traceHeader);
-          args[1] = { ...(init || {}), headers: currentHeaders };
+        if (typeof requestInfo === "string" || requestInfo instanceof URL) {
+          fullUrl = requestInfo.toString();
+          method = (init?.method || "GET").toUpperCase();
+        } else if (requestInfo instanceof Request) {
+          fullUrl = requestInfo.url;
+          method = requestInfo.method.toUpperCase();
         }
-        reqHeadersObj["traceparent"] = traceHeader;
-      }
+
+        try { fullUrl = new URL(fullUrl, window.location.origin).toString(); } catch (e) {}
+
+        if (fullUrl.includes(self.endpoint)) {
+          return originalFetch.apply(this, args);
+        }
+
+        spanId = generateHex(16);
+        startTime = Date.now() - self.traceStartTime;
+
+        reqHeadersObj = extractHeaders(init?.headers || (requestInfo instanceof Request ? requestInfo.headers : {}));
+
+        if (self.shouldAttachTraceHeader(fullUrl)) {
+          const traceHeader = `00-${self.traceId}-${spanId}-01`;
+          if (requestInfo instanceof Request) {
+            const currentHeaders = new Headers(requestInfo.headers);
+            currentHeaders.set("traceparent", traceHeader);
+            args[1] = { ...(init || {}), headers: currentHeaders };
+          } else {
+            const currentHeaders = new Headers(init?.headers || {});
+            currentHeaders.set("traceparent", traceHeader);
+            args[1] = { ...(init || {}), headers: currentHeaders };
+          }
+          reqHeadersObj["traceparent"] = traceHeader;
+        }
+      } catch (e) {}
 
       const captureSpan = (status: number, response?: Response, errorMsg?: string) => {
-        const duration = Date.now() - self.traceStartTime - startTime;
+        try {
+          const duration = Date.now() - self.traceStartTime - (startTime || 0);
 
-        const meta: any = {
-          url: fullUrl,
-          method,
-          library: "fetch",
-          status,
-          requestPayloadSize: getPayloadSize(init?.body),
-          requestHeaders: reqHeadersObj,
-        };
+          const meta: any = {
+            url: fullUrl,
+            method,
+            library: "fetch",
+            status,
+            requestPayloadSize: getPayloadSize(args[1]?.body),
+            requestHeaders: reqHeadersObj,
+          };
 
-        if (response) {
-          meta.statusText = response.statusText;
-          meta.type = response.type;
-          meta.redirected = response.redirected;
-          meta.responseHeaders = extractHeaders(response.headers);
-        }
+          if (response) {
+            meta.statusText = response.statusText;
+            meta.type = response.type;
+            meta.redirected = response.redirected;
+            meta.responseHeaders = extractHeaders(response.headers);
+          }
 
-        if (errorMsg) meta.error = errorMsg;
+          if (errorMsg) meta.error = errorMsg;
 
-        self.pushSpan({
-          spanId,
-          name: `${method} ${new URL(fullUrl, window.location.origin).pathname}`,
-          type: "http",
-          startTime,
-          duration,
-          status,
-          meta,
-        });
+          self.pushSpan({
+            spanId,
+            name: `${method} ${fullUrl ? new URL(fullUrl, window.location.origin).pathname : 'unknown'}`,
+            type: "http",
+            startTime,
+            duration,
+            status,
+            meta,
+          });
+        } catch (e) {}
       };
 
       try {
@@ -584,45 +608,56 @@ export class SenzorRumAgent {
 
   private setupRoutingListeners() {
     const originalPushState = history.pushState;
-    history.pushState = (...args) => {
-      this.flush();
-      originalPushState.apply(history, args);
-      this.startNewTrace(false);
-      this.addBreadcrumb("navigation", window.location.pathname);
-    };
+    if (typeof originalPushState === "function") {
+      history.pushState = (...args) => {
+        try { this.flush(); } catch (e) {}
+        const result = originalPushState.apply(history, args);
+        try {
+          this.startNewTrace(false);
+          this.addBreadcrumb("navigation", window.location.pathname);
+        } catch (e) {}
+        return result;
+      };
+    }
 
     window.addEventListener("popstate", () => {
-      this.flush();
-      this.startNewTrace(false);
-      this.addBreadcrumb("navigation", window.location.pathname);
+      try {
+        this.flush();
+        this.startNewTrace(false);
+        this.addBreadcrumb("navigation", window.location.pathname);
+      } catch (e) {}
     });
 
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "hidden") {
-        this.pushSpan({
-          spanId: generateHex(16),
-          name: "App Backgrounded",
-          type: "visibility",
-          startTime: Date.now() - this.traceStartTime,
-          duration: 0,
-          status: 200,
-          meta: { state: "hidden" },
-        });
-        this.flush();
-      } else {
-        this.pushSpan({
-          spanId: generateHex(16),
-          name: "App Foregrounded",
-          type: "visibility",
-          startTime: Date.now() - this.traceStartTime,
-          duration: 0,
-          status: 200,
-          meta: { state: "visible" },
-        });
-      }
+      try {
+        if (document.visibilityState === "hidden") {
+          this.pushSpan({
+            spanId: generateHex(16),
+            name: "App Backgrounded",
+            type: "visibility",
+            startTime: Date.now() - this.traceStartTime,
+            duration: 0,
+            status: 200,
+            meta: { state: "hidden" },
+          });
+          this.flush();
+        } else {
+          this.pushSpan({
+            spanId: generateHex(16),
+            name: "App Foregrounded",
+            type: "visibility",
+            startTime: Date.now() - this.traceStartTime,
+            duration: 0,
+            status: 200,
+            meta: { state: "visible" },
+          });
+        }
+      } catch (e) {}
     });
 
-    window.addEventListener("pagehide", () => this.flush());
+    window.addEventListener("pagehide", () => {
+      try { this.flush(); } catch (e) {}
+    });
   }
 
   private debouncedFlush() {
@@ -631,59 +666,64 @@ export class SenzorRumAgent {
   }
 
   private flush() {
-    if (this.flushTimeout) {
-      clearTimeout(this.flushTimeout);
-      this.flushTimeout = null;
-    }
-
-    if (this.spanQueue.length === 0 && this.errorQueue.length === 0 && this.logQueue.length === 0 && !this.isInitialLoad) return;
-
-    const spansToSend = this.spanQueue.splice(0, this.MAX_BATCH_SIZE);
-    const errorsToSend = this.errorQueue.splice(0, 20);
-    const logsToSend = this.logQueue.splice(0, this.MAX_BATCH_SIZE); // Extract Logs for batching
-
-    const payload: any = { traces: [], errors: errorsToSend, logs: logsToSend };
-
-    if (this.isSampled) {
-      if (this.isInitialLoad) {
-        this.captureNavigationSpans();
+    try {
+      if (this.flushTimeout) {
+        clearTimeout(this.flushTimeout);
+        this.flushTimeout = null;
       }
 
-      payload.traces.push({
-        traceId: this.traceId,
-        sessionId: this.sessionId,
-        traceType: this.isInitialLoad ? "initial_load" : (this.isFirstFlushOfTrace ? "route_change" : "span_update"),
-        path: window.location.pathname,
-        referrer: document.referrer || "",
-        vitals: { ...this.vitals },
-        timings: this.isInitialLoad ? this.getNavigationTimings() : {},
-        frustration: { ...this.frustrations },
-        ...getBrowserContext(),
-        spans: spansToSend,
-        duration: Date.now() - this.traceStartTime,
-        timestamp: new Date(this.traceStartTime).toISOString(),
-      });
-      this.isFirstFlushOfTrace = false;
-    }
+      if (this.spanQueue.length === 0 && this.errorQueue.length === 0 && this.logQueue.length === 0 && !this.isInitialLoad) return;
 
-    this.isInitialLoad = false;
+      const spansToSend = this.spanQueue.splice(0, this.MAX_BATCH_SIZE);
+      const errorsToSend = this.errorQueue.splice(0, 20);
+      const logsToSend = this.logQueue.splice(0, this.MAX_BATCH_SIZE); // Extract Logs for batching
 
-    if (payload.traces.length > 0 || payload.errors.length > 0 || payload.logs.length > 0) {
-      const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+      const payload: any = { traces: [], errors: errorsToSend, logs: logsToSend };
 
-      const separator = this.endpoint.includes("?") ? "&" : "?";
-      const authUrl = `${this.endpoint}${separator}apiKey=${this.config.apiKey}`;
+      if (this.isSampled) {
+        if (this.isInitialLoad) {
+          this.captureNavigationSpans();
+        }
 
-      if (navigator.sendBeacon && blob.size < 60000) { 
-        navigator.sendBeacon(authUrl, blob);
-      } else {
-        fetch(authUrl, {
-          method: "POST",
-          body: blob,
-          keepalive: true,
-          headers: { "x-service-api-key": this.config.apiKey },
-        }).catch(() => {});
+        payload.traces.push({
+          traceId: this.traceId,
+          sessionId: this.sessionId,
+          traceType: this.isInitialLoad ? "initial_load" : (this.isFirstFlushOfTrace ? "route_change" : "span_update"),
+          path: window.location.pathname,
+          referrer: document.referrer || "",
+          vitals: { ...this.vitals },
+          timings: this.isInitialLoad ? this.getNavigationTimings() : {},
+          frustration: { ...this.frustrations },
+          ...getBrowserContext(),
+          spans: spansToSend,
+          duration: Date.now() - this.traceStartTime,
+          timestamp: new Date(this.traceStartTime).toISOString(),
+        });
+        this.isFirstFlushOfTrace = false;
       }
+
+      this.isInitialLoad = false;
+
+      if (payload.traces.length > 0 || payload.errors.length > 0 || payload.logs.length > 0) {
+        const jsonPayload = safeStringify(payload);
+        const blob = new Blob([jsonPayload], { type: "application/json" });
+
+        const separator = this.endpoint.includes("?") ? "&" : "?";
+        const authUrl = `${this.endpoint}${separator}apiKey=${this.config.apiKey}`;
+
+        if (navigator.sendBeacon && blob.size < 60000) { 
+          navigator.sendBeacon(authUrl, blob);
+        } else {
+          fetch(authUrl, {
+            method: "POST",
+            body: blob,
+            keepalive: true,
+            headers: { "x-service-api-key": this.config.apiKey },
+          }).catch(() => {});
+        }
+      }
+    } catch (e) {
+      // Critical: Never allow ingestion failures to crash the host application
     }
   }
 }
