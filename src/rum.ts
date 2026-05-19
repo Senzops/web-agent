@@ -32,6 +32,7 @@ export class SenzorRumAgent {
   private traceId: string = "";
   private traceStartTime: number = 0;
   private isInitialLoad: boolean = true;
+  private isFirstFlushOfTrace: boolean = true;
 
   // --- BATCHING QUEUES & LIMITS ---
   private spanQueue: any[] = [];
@@ -177,6 +178,7 @@ export class SenzorRumAgent {
     this.traceId = generateHex(32);
     this.traceStartTime = Date.now();
     this.isInitialLoad = isInitialLoad;
+    this.isFirstFlushOfTrace = true;
     this.vitals = {};
     this.frustrations = { rageClicks: 0, deadClicks: 0, errorCount: 0 };
   }
@@ -326,6 +328,10 @@ export class SenzorRumAgent {
 
       try { fullUrl = new URL(xhr.__szUrl, window.location.origin).toString(); } catch (e) {}
 
+      if (fullUrl.includes(self.endpoint)) {
+        return originalXhrSend.call(this, body);
+      }
+
       if (self.shouldAttachTraceHeader(fullUrl)) {
         xhr.setRequestHeader("traceparent", `00-${self.traceId}-${spanId}-01`);
       }
@@ -394,6 +400,10 @@ export class SenzorRumAgent {
 
       let fullUrl = url;
       try { fullUrl = new URL(url, window.location.origin).toString(); } catch (e) {}
+
+      if (fullUrl.includes(self.endpoint)) {
+        return originalFetch.apply(this, args);
+      }
 
       const spanId = generateHex(16);
       const startTime = Date.now() - self.traceStartTime;
@@ -485,6 +495,11 @@ export class SenzorRumAgent {
   }
 
   private flush() {
+    if (this.flushTimeout) {
+      clearTimeout(this.flushTimeout);
+      this.flushTimeout = null;
+    }
+
     if (this.spanQueue.length === 0 && this.errorQueue.length === 0 && this.logQueue.length === 0 && !this.isInitialLoad) return;
 
     const spansToSend = this.spanQueue.splice(0, this.MAX_BATCH_SIZE);
@@ -497,7 +512,7 @@ export class SenzorRumAgent {
       payload.traces.push({
         traceId: this.traceId,
         sessionId: this.sessionId,
-        traceType: this.isInitialLoad ? "initial_load" : "route_change",
+        traceType: this.isInitialLoad ? "initial_load" : (this.isFirstFlushOfTrace ? "route_change" : "span_update"),
         path: window.location.pathname,
         referrer: document.referrer || "",
         vitals: { ...this.vitals },
@@ -508,6 +523,7 @@ export class SenzorRumAgent {
         duration: Date.now() - this.traceStartTime,
         timestamp: new Date(this.traceStartTime).toISOString(),
       });
+      this.isFirstFlushOfTrace = false;
     }
 
     this.isInitialLoad = false;
