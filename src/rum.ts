@@ -4,7 +4,9 @@ import {
   getBrowserContext,
   getPayloadSize,
   extractHeaders,
-  safeStringify
+  safeStringify,
+  safeSessionStorage,
+  onRouteChange
 } from "./utils";
 import { ErrorEngine } from "./error";
 
@@ -46,9 +48,13 @@ export class SenzorRumAgent {
   private flushInterval: any;
   private flushTimeout: any = null;
   private readonly MAX_BATCH_SIZE = 50;
-  private readonly MAX_QUEUE_MEMORY = 500; 
+  private readonly MAX_QUEUE_MEMORY = 500;
 
   private errorEngine!: ErrorEngine;
+  private unsubRouting: (() => void) | null = null;
+  private visibilityHandler: (() => void) | null = null;
+  private pageHideHandler: (() => void) | null = null;
+  private clickHandler: ((e: MouseEvent) => void) | null = null;
 
   /**
    * Enterprise Custom Span API
@@ -191,10 +197,10 @@ export class SenzorRumAgent {
   }
 
   private manageSession() {
-    if (!sessionStorage.getItem("sz_rum_sid")) {
-      sessionStorage.setItem("sz_rum_sid", generateUUID());
+    if (!safeSessionStorage.getItem("sz_rum_sid")) {
+      safeSessionStorage.setItem("sz_rum_sid", generateUUID());
     }
-    this.sessionId = sessionStorage.getItem("sz_rum_sid") as string;
+    this.sessionId = safeSessionStorage.getItem("sz_rum_sid") as string;
   }
 
   private startNewTrace(isInitialLoad: boolean) {
@@ -212,7 +218,7 @@ export class SenzorRumAgent {
   }
 
   private setupUXListeners() {
-    document.addEventListener("click", (e) => {
+    this.clickHandler = (e: MouseEvent) => {
       try {
         const target = e.target as HTMLElement;
         if (!target) return;
@@ -273,7 +279,8 @@ export class SenzorRumAgent {
       } catch (e) {
         // Never block user clicks
       }
-    }, { capture: true, passive: true });
+    };
+    document.addEventListener("click", this.clickHandler, { capture: true, passive: true } as AddEventListenerOptions);
   }
 
   private setupPerformanceObservers() {
@@ -606,29 +613,27 @@ export class SenzorRumAgent {
     };
   }
 
-  private setupRoutingListeners() {
-    const originalPushState = history.pushState;
-    if (typeof originalPushState === "function") {
-      history.pushState = (...args) => {
-        try { this.flush(); } catch (e) {}
-        const result = originalPushState.apply(history, args);
-        try {
-          this.startNewTrace(false);
-          this.addBreadcrumb("navigation", window.location.pathname);
-        } catch (e) {}
-        return result;
-      };
-    }
+  public destroy() {
+    if (this.flushInterval) { clearInterval(this.flushInterval); this.flushInterval = null; }
+    if (this.flushTimeout) { clearTimeout(this.flushTimeout); this.flushTimeout = null; }
+    if (this.unsubRouting) { this.unsubRouting(); this.unsubRouting = null; }
+    if (this.visibilityHandler) { document.removeEventListener('visibilitychange', this.visibilityHandler); this.visibilityHandler = null; }
+    if (this.pageHideHandler) { window.removeEventListener('pagehide', this.pageHideHandler); this.pageHideHandler = null; }
+    if (this.clickHandler) { document.removeEventListener('click', this.clickHandler, true); this.clickHandler = null; }
+    this.flush();
+    this.initialized = false;
+  }
 
-    window.addEventListener("popstate", () => {
+  private setupRoutingListeners() {
+    this.unsubRouting = onRouteChange(() => {
+      try { this.flush(); } catch (e) {}
       try {
-        this.flush();
         this.startNewTrace(false);
         this.addBreadcrumb("navigation", window.location.pathname);
       } catch (e) {}
     });
 
-    document.addEventListener("visibilitychange", () => {
+    this.visibilityHandler = () => {
       try {
         if (document.visibilityState === "hidden") {
           this.pushSpan({
@@ -653,11 +658,13 @@ export class SenzorRumAgent {
           });
         }
       } catch (e) {}
-    });
+    };
+    document.addEventListener("visibilitychange", this.visibilityHandler);
 
-    window.addEventListener("pagehide", () => {
+    this.pageHideHandler = () => {
       try { this.flush(); } catch (e) {}
-    });
+    };
+    window.addEventListener("pagehide", this.pageHideHandler);
   }
 
   private debouncedFlush() {
@@ -705,20 +712,21 @@ export class SenzorRumAgent {
       this.isInitialLoad = false;
 
       if (payload.traces.length > 0 || payload.errors.length > 0 || payload.logs.length > 0) {
+        payload.apiKey = this.config.apiKey;
         const jsonPayload = safeStringify(payload);
         const blob = new Blob([jsonPayload], { type: "application/json" });
 
-        const separator = this.endpoint.includes("?") ? "&" : "?";
-        const authUrl = `${this.endpoint}${separator}apiKey=${this.config.apiKey}`;
-
-        if (navigator.sendBeacon && blob.size < 60000) { 
-          navigator.sendBeacon(authUrl, blob);
+        if (navigator.sendBeacon && blob.size < 60000) {
+          navigator.sendBeacon(this.endpoint, blob);
         } else {
-          fetch(authUrl, {
+          fetch(this.endpoint, {
             method: "POST",
             body: blob,
             keepalive: true,
-            headers: { "x-service-api-key": this.config.apiKey },
+            headers: {
+              "Content-Type": "application/json",
+              "x-service-api-key": this.config.apiKey,
+            },
           }).catch(() => {});
         }
       }

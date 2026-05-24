@@ -7,7 +7,11 @@ declare class SenzorAnalyticsAgent {
     private startTime;
     private endpoint;
     private initialized;
+    private unsubRouting;
+    private visibilityHandler;
+    private beforeUnloadHandler;
     init(config: AnalyticsConfig): void;
+    destroy(): void;
     private normalizeUrl;
     private manageSession;
     private determineReferrer;
@@ -48,6 +52,10 @@ declare class SenzorRumAgent {
     private readonly MAX_BATCH_SIZE;
     private readonly MAX_QUEUE_MEMORY;
     private errorEngine;
+    private unsubRouting;
+    private visibilityHandler;
+    private pageHideHandler;
+    private clickHandler;
     /**
      * Enterprise Custom Span API
      */
@@ -66,6 +74,7 @@ declare class SenzorRumAgent {
     private shouldAttachTraceHeader;
     private pushSpan;
     private patchNetwork;
+    destroy(): void;
     private setupRoutingListeners;
     private debouncedFlush;
     private flush;
@@ -79,6 +88,7 @@ declare const Senzor: {
     startSpan: (name: string, meta?: Record<string, any>) => {
         end: (endMeta?: Record<string, any>) => void;
     };
+    destroy: () => void;
 };
 
-export { Analytics, type AnalyticsConfig, RUM, type RumConfig, Senzor };
+export { Analytics, type AnalyticsConfig, RUM, type RumConfig, Senzor, SenzorAnalyticsAgent, SenzorRumAgent };

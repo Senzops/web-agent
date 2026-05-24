@@ -1,4 +1,4 @@
-import { generateUUID, safeStringify } from './utils';
+import { generateUUID, safeStringify, safeLocalStorage, safeSessionStorage, onRouteChange } from './utils';
 
 export interface AnalyticsConfig {
   webId: string;
@@ -10,6 +10,9 @@ export class SenzorAnalyticsAgent {
   private startTime: number = Date.now();
   private endpoint: string = 'https://api.senzor.dev/api/ingest/web';
   private initialized: boolean = false;
+  private unsubRouting: (() => void) | null = null;
+  private visibilityHandler: (() => void) | null = null;
+  private beforeUnloadHandler: (() => void) | null = null;
 
   public init(config: AnalyticsConfig) {
     if (this.initialized) return;
@@ -17,7 +20,7 @@ export class SenzorAnalyticsAgent {
     this.config = { ...this.config, ...config };
     if (config.endpoint) this.endpoint = config.endpoint;
 
-    if (!this.config.webId) {
+    if (!this.config.webId || typeof this.config.webId !== 'string') {
       console.error('[Senzor] webId is required for Analytics.');
       return;
     }
@@ -31,34 +34,41 @@ export class SenzorAnalyticsAgent {
     }
   }
 
+  public destroy() {
+    if (this.unsubRouting) { this.unsubRouting(); this.unsubRouting = null; }
+    if (this.visibilityHandler) { document.removeEventListener('visibilitychange', this.visibilityHandler); this.visibilityHandler = null; }
+    if (this.beforeUnloadHandler) { window.removeEventListener('beforeunload', this.beforeUnloadHandler); this.beforeUnloadHandler = null; }
+    this.initialized = false;
+  }
+
   private normalizeUrl(url: string): string {
     return url ? url.replace(/^https?:\/\//, '').replace(/^www\./, '') : '';
   }
 
   private manageSession() {
     const now = Date.now();
-    const lastActivity = parseInt(localStorage.getItem('senzor_last_activity') || '0', 10);
+    const lastActivity = parseInt(safeLocalStorage.getItem('senzor_last_activity') || '0', 10);
     const sessionTimeout = 30 * 60 * 1000; // 30 minutes
 
-    if (!localStorage.getItem('senzor_vid')) localStorage.setItem('senzor_vid', generateUUID());
+    if (!safeLocalStorage.getItem('senzor_vid')) safeLocalStorage.setItem('senzor_vid', generateUUID());
 
-    let sessionId = sessionStorage.getItem('senzor_sid');
+    let sessionId = safeSessionStorage.getItem('senzor_sid');
     const isExpired = (now - lastActivity > sessionTimeout);
 
     if (!sessionId || isExpired) {
       sessionId = generateUUID();
-      sessionStorage.setItem('senzor_sid', sessionId);
+      safeSessionStorage.setItem('senzor_sid', sessionId);
       this.determineReferrer(true);
     } else {
       this.determineReferrer(false);
     }
-    localStorage.setItem('senzor_last_activity', now.toString());
+    safeLocalStorage.setItem('senzor_last_activity', now.toString());
   }
 
   private determineReferrer(isNewSession: boolean) {
     const rawReferrer = document.referrer;
     const currentHost = window.location.hostname;
-    let storedReferrer = sessionStorage.getItem('senzor_ref');
+    let storedReferrer = safeSessionStorage.getItem('senzor_ref');
 
     let isExternal = false;
     if (rawReferrer) {
@@ -70,18 +80,18 @@ export class SenzorAnalyticsAgent {
 
     if (isExternal) {
       const cleanRef = this.normalizeUrl(rawReferrer);
-      if (cleanRef !== storedReferrer) sessionStorage.setItem('senzor_ref', cleanRef);
+      if (cleanRef !== storedReferrer) safeSessionStorage.setItem('senzor_ref', cleanRef);
     } else if (isNewSession && !storedReferrer) {
-      sessionStorage.setItem('senzor_ref', 'Direct');
+      safeSessionStorage.setItem('senzor_ref', 'Direct');
     }
   }
 
   private getIds() {
-    localStorage.setItem('senzor_last_activity', Date.now().toString());
+    safeLocalStorage.setItem('senzor_last_activity', Date.now().toString());
     return {
-      visitorId: localStorage.getItem('senzor_vid') || 'unknown',
-      sessionId: sessionStorage.getItem('senzor_sid') || 'unknown',
-      referrer: sessionStorage.getItem('senzor_ref') || 'Direct'
+      visitorId: safeLocalStorage.getItem('senzor_vid') || 'unknown',
+      sessionId: safeSessionStorage.getItem('senzor_sid') || 'unknown',
+      referrer: safeSessionStorage.getItem('senzor_ref') || 'Direct'
     };
   }
 
@@ -126,8 +136,9 @@ export class SenzorAnalyticsAgent {
   private send(data: any) {
     try {
       const payload = safeStringify(data);
-      if (navigator.sendBeacon) {
-        if (!navigator.sendBeacon(this.endpoint, new Blob([payload], { type: 'application/json' }))) {
+      const blob = new Blob([payload], { type: 'application/json' });
+      if (navigator.sendBeacon && blob.size < 60000) {
+        if (!navigator.sendBeacon(this.endpoint, blob)) {
           this.fallbackSend(payload);
         }
       } else {
@@ -146,24 +157,12 @@ export class SenzorAnalyticsAgent {
   }
 
   private setupListeners() {
-    const originalPushState = history.pushState;
-    if (typeof originalPushState === 'function') {
-      history.pushState = (...args) => {
-        try { this.trackPing(); } catch (e) {}
-        const result = originalPushState.apply(history, args);
-        try { this.trackPageView(); } catch (e) {}
-        return result;
-      };
-    }
-
-    window.addEventListener('popstate', () => {
-      try {
-        this.trackPing();
-        this.trackPageView();
-      } catch (e) {}
+    this.unsubRouting = onRouteChange((type) => {
+      try { this.trackPing(); } catch (e) {}
+      try { this.trackPageView(); } catch (e) {}
     });
 
-    document.addEventListener('visibilitychange', () => {
+    this.visibilityHandler = () => {
       try {
         if (document.visibilityState === 'hidden') {
           this.trackPing();
@@ -172,9 +171,12 @@ export class SenzorAnalyticsAgent {
           this.manageSession();
         }
       } catch (e) {}
-    });
-    window.addEventListener('beforeunload', () => {
+    };
+    document.addEventListener('visibilitychange', this.visibilityHandler);
+
+    this.beforeUnloadHandler = () => {
       try { this.trackPing(); } catch (e) {}
-    });
+    };
+    window.addEventListener('beforeunload', this.beforeUnloadHandler);
   }
 }

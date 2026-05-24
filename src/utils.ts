@@ -1,3 +1,91 @@
+// ---------------------------------------------------------------------------
+// Safe Storage — in-memory fallback for Safari private browsing, sandboxed
+// iframes, and enterprise browsers that block Web Storage.
+// ---------------------------------------------------------------------------
+const memoryStore = new Map<string, string>();
+
+function storageAvailable(storage: Storage): boolean {
+  try {
+    const key = '__sz_test__';
+    storage.setItem(key, '1');
+    storage.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const _localOk = typeof localStorage !== 'undefined' && storageAvailable(localStorage);
+const _sessionOk = typeof sessionStorage !== 'undefined' && storageAvailable(sessionStorage);
+
+export const safeLocalStorage = {
+  getItem(key: string): string | null {
+    if (_localOk) { try { return localStorage.getItem(key); } catch { /* fall through */ } }
+    return memoryStore.get('l:' + key) ?? null;
+  },
+  setItem(key: string, value: string): void {
+    if (_localOk) { try { localStorage.setItem(key, value); return; } catch { /* fall through */ } }
+    memoryStore.set('l:' + key, value);
+  },
+  removeItem(key: string): void {
+    if (_localOk) { try { localStorage.removeItem(key); return; } catch { /* fall through */ } }
+    memoryStore.delete('l:' + key);
+  }
+};
+
+export const safeSessionStorage = {
+  getItem(key: string): string | null {
+    if (_sessionOk) { try { return sessionStorage.getItem(key); } catch { /* fall through */ } }
+    return memoryStore.get('s:' + key) ?? null;
+  },
+  setItem(key: string, value: string): void {
+    if (_sessionOk) { try { sessionStorage.setItem(key, value); return; } catch { /* fall through */ } }
+    memoryStore.set('s:' + key, value);
+  },
+  removeItem(key: string): void {
+    if (_sessionOk) { try { sessionStorage.removeItem(key); return; } catch { /* fall through */ } }
+    memoryStore.delete('s:' + key);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Routing event bus — single shared patch for history.pushState / popstate
+// so that both Analytics and RUM agents can subscribe without double-patching.
+// ---------------------------------------------------------------------------
+type RoutingCallback = (type: 'push' | 'pop') => void;
+const routingListeners: RoutingCallback[] = [];
+let routingPatched = false;
+
+export function onRouteChange(cb: RoutingCallback): () => void {
+  routingListeners.push(cb);
+
+  if (!routingPatched && typeof window !== 'undefined') {
+    routingPatched = true;
+
+    const originalPushState = history.pushState;
+    if (typeof originalPushState === 'function') {
+      history.pushState = function (...args) {
+        const result = originalPushState.apply(history, args);
+        for (const fn of routingListeners) { try { fn('push'); } catch {} }
+        return result;
+      };
+    }
+
+    window.addEventListener('popstate', () => {
+      for (const fn of routingListeners) { try { fn('pop'); } catch {} }
+    });
+  }
+
+  return () => {
+    const idx = routingListeners.indexOf(cb);
+    if (idx !== -1) routingListeners.splice(idx, 1);
+  };
+}
+
+// ---------------------------------------------------------------------------
+// UUID / Hex generators
+// ---------------------------------------------------------------------------
+
 // Native UUID Generator (No external dependencies)
 export function generateUUID(): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {

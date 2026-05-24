@@ -8,7 +8,8 @@ export const RUM = new SenzorRumAgent();
 export const Senzor = {
   init: (config: AnalyticsConfig) => Analytics.init(config),
   initRum: (config: RumConfig) => RUM.init(config),
-  startSpan: (name: string, meta?: Record<string, any>) => RUM.startSpan(name, meta)
+  startSpan: (name: string, meta?: Record<string, any>) => RUM.startSpan(name, meta),
+  destroy: () => { Analytics.destroy(); RUM.destroy(); }
 };
 
 // Auto-attach to window for script tag users
@@ -17,3 +18,4 @@ if (typeof window !== 'undefined') {
 }
 
 export type { AnalyticsConfig, RumConfig };
+export { SenzorAnalyticsAgent, SenzorRumAgent };
