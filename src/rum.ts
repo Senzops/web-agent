@@ -13,9 +13,9 @@ import { ErrorEngine } from "./error";
 export interface RumConfig {
   apiKey: string;
   endpoint?: string;
-  sampleRate?: number; 
-  allowedOrigins?: (string | RegExp)[]; 
-  autoLogs?: boolean; // Toggle to disable auto console logs (default: true)
+  sampleRate?: number;
+  allowedOrigins?: (string | RegExp)[];
+  autoLogs?: boolean;
 }
 
 export class SenzorRumAgent {
@@ -39,11 +39,21 @@ export class SenzorRumAgent {
   // --- BATCHING QUEUES & LIMITS ---
   private spanQueue: any[] = [];
   private errorQueue: any[] = [];
-  private logQueue: any[] = []; // Browser Logs Queue
+  private logQueue: any[] = [];
   private vitals: any = {};
   private breadcrumbs: any[] = [];
   private frustrations = { rageClicks: 0, deadClicks: 0, errorCount: 0 };
   private clickHistory: { x: number; y: number; time: number }[] = [];
+
+  // CLS session window tracking (Google spec)
+  private clsSessionEntries: { value: number; time: number }[] = [];
+  private clsSessionValue: number = 0;
+  private clsMaxSessionValue: number = 0;
+  private clsSessionStartTime: number = 0;
+
+  // INP P98 tracking (Google spec)
+  private inpEntries: number[] = [];
+  private readonly MAX_INP_ENTRIES = 200;
 
   private flushInterval: any;
   private flushTimeout: any = null;
@@ -62,17 +72,18 @@ export class SenzorRumAgent {
   public startSpan(name: string, meta?: Record<string, any>) {
     const spanId = generateHex(16);
     const startTime = Date.now() - this.traceStartTime;
+    const capturedTraceStartTime = this.traceStartTime;
 
     return {
       end: (endMeta?: Record<string, any>) => {
-        const duration = Date.now() - this.traceStartTime - startTime;
+        const duration = Date.now() - capturedTraceStartTime - startTime;
         this.pushSpan({
           spanId,
           name,
           type: "custom",
           startTime,
-          duration,
-          status: 200, // Success by default for custom spans
+          duration: Math.max(0, duration),
+          status: 200,
           meta: { ...meta, ...endMeta },
         });
       },
@@ -90,7 +101,7 @@ export class SenzorRumAgent {
       return;
     }
 
-    this.isSampled = Math.random() <= (this.config.sampleRate ?? 1.0);
+    this.isSampled = Math.random() < (this.config.sampleRate ?? 1.0);
 
     this.manageSession();
     this.startNewTrace(true);
@@ -107,7 +118,7 @@ export class SenzorRumAgent {
     });
     this.errorEngine.setup();
 
-    this.setupLogInterception(); // Fire up Auto Log Instrumentation
+    this.setupLogInterception();
     this.setupPerformanceObservers();
     this.setupUXListeners();
     if (this.isSampled) this.patchNetwork();
@@ -118,7 +129,7 @@ export class SenzorRumAgent {
 
   // --- Enterprise Auto-Log Interception ---
   private setupLogInterception() {
-    if (this.config.autoLogs === false) return; // Opt-out check
+    if (this.config.autoLogs === false) return;
 
     const levels = ['log', 'info', 'warn', 'error', 'debug'] as const;
     const originalConsole = {
@@ -129,11 +140,10 @@ export class SenzorRumAgent {
       debug: console.debug
     };
 
-    let isIntercepting = false; // Lock prevents SDK internal logs from looping infinitely
+    let isIntercepting = false;
 
     levels.forEach(level => {
       console[level] = (...args: any[]) => {
-        // ALWAYS execute original console so the developer's DevTools aren't broken!
         originalConsole[level].apply(console, args);
 
         if (isIntercepting) return;
@@ -152,7 +162,6 @@ export class SenzorRumAgent {
               attributes.errorName = arg.name;
             } else if (typeof arg === 'object' && arg !== null) {
               try {
-                // New Relic Style Destructuring: Merge all object keys into `attributes`
                 const parsed = JSON.parse(safeStringify(arg));
                 attributes = { ...attributes, ...parsed };
               } catch (e) {
@@ -167,30 +176,27 @@ export class SenzorRumAgent {
             message = 'Object Log';
           }
 
-          // Push to in-memory queue
           this.logQueue.push({
             message: message || 'Empty log',
-            level: level === 'log' ? 'info' : level, // Map generic log to info
+            level: level === 'log' ? 'info' : level,
             attributes,
             traceId: this.isSampled ? this.traceId : undefined,
             sessionId: this.sessionId,
-            url: window.location.href, // Inject page context
+            url: window.location.href,
             timestamp: new Date().toISOString()
           });
 
-          // Memory limits
           if (this.logQueue.length > this.MAX_QUEUE_MEMORY) {
             this.logQueue.shift();
           }
 
-          // Trigger flush if batch gets too big
           if (this.logQueue.length >= this.MAX_BATCH_SIZE) {
             this.debouncedFlush();
           }
         } catch (e) {
           // Never crash host app during logging
         } finally {
-          isIntercepting = false; // Release lock
+          isIntercepting = false;
         }
       };
     });
@@ -209,7 +215,20 @@ export class SenzorRumAgent {
     this.isInitialLoad = isInitialLoad;
     this.isFirstFlushOfTrace = true;
     this.vitals = {};
-    this.frustrations = { rageClicks: 0, deadClicks: 0, errorCount: 0 };
+
+    // Reset frustrations IN-PLACE to preserve ErrorEngine's reference
+    this.frustrations.rageClicks = 0;
+    this.frustrations.deadClicks = 0;
+    this.frustrations.errorCount = 0;
+
+    // Reset CLS session window tracking for new page
+    this.clsSessionEntries = [];
+    this.clsSessionValue = 0;
+    this.clsMaxSessionValue = 0;
+    this.clsSessionStartTime = 0;
+
+    // Reset INP entries for new page
+    this.inpEntries = [];
   }
 
   private addBreadcrumb(type: string, message: string, data?: any) {
@@ -239,7 +258,7 @@ export class SenzorRumAgent {
           target.closest("a") ||
           target.hasAttribute("role") ||
           target.onclick;
-          
+
         if (!isInteractive) this.frustrations.deadClicks++;
 
         const now = Date.now();
@@ -261,7 +280,6 @@ export class SenzorRumAgent {
           }
         }
 
-        // Push Interaction Span
         this.pushSpan({
           spanId: clickSpanId,
           name: `Click: ${tag}${target.id ? "#" + target.id : ""}`,
@@ -298,30 +316,54 @@ export class SenzorRumAgent {
         if (lastEntry) this.vitals.lcp = lastEntry.startTime;
       }).observe({ type: "largest-contentful-paint", buffered: true });
 
-      let clsScore = 0;
+      // CLS with session window grouping (Google spec)
       new PerformanceObserver((entryList) => {
         for (const entry of entryList.getEntries()) {
-          if (!(entry as any).hadRecentInput) {
-            clsScore += (entry as any).value;
-            this.vitals.cls = clsScore;
+          if ((entry as any).hadRecentInput) continue;
+
+          const shiftValue = (entry as any).value;
+          const shiftTime = entry.startTime;
+
+          const lastEntry = this.clsSessionEntries[this.clsSessionEntries.length - 1];
+          const gap = lastEntry ? shiftTime - lastEntry.time : 0;
+          const sessionDuration = this.clsSessionStartTime ? shiftTime - this.clsSessionStartTime : 0;
+
+          if (lastEntry && gap < 1000 && sessionDuration < 5000) {
+            this.clsSessionValue += shiftValue;
+          } else {
+            this.clsSessionValue = shiftValue;
+            this.clsSessionStartTime = shiftTime;
+            this.clsSessionEntries = [];
           }
+
+          this.clsSessionEntries.push({ value: shiftValue, time: shiftTime });
+
+          if (this.clsSessionValue > this.clsMaxSessionValue) {
+            this.clsMaxSessionValue = this.clsSessionValue;
+          }
+          this.vitals.cls = this.clsMaxSessionValue;
         }
       }).observe({ type: "layout-shift", buffered: true });
 
+      // INP — track all interaction durations for P98 calculation
       new PerformanceObserver((entryList) => {
         for (const entry of entryList.getEntries()) {
           const evt = entry as any;
           const delay = evt.duration || (evt.processingStart && evt.startTime ? evt.processingStart - evt.startTime : 0);
-          if (!this.vitals.inp || delay > this.vitals.inp) {
-            this.vitals.inp = delay;
+          if (delay > 0) {
+            this.inpEntries.push(delay);
+            if (this.inpEntries.length > this.MAX_INP_ENTRIES) {
+              this.inpEntries.sort((a, b) => a - b);
+              this.inpEntries = this.inpEntries.slice(-100);
+            }
+            this.vitals.inp = this.computeINP();
           }
         }
       }).observe({ type: "event", buffered: true, durationThreshold: 40 } as any);
 
-      // --- Enterprise: Resource Timing ---
+      // Resource Timing
       new PerformanceObserver((entryList) => {
         for (const entry of entryList.getEntries() as PerformanceResourceTiming[]) {
-          // Filter out our own ingestion calls to prevent feedback loops
           if (entry.name.includes(this.endpoint)) continue;
 
           this.pushSpan({
@@ -330,7 +372,7 @@ export class SenzorRumAgent {
             type: "resource",
             startTime: entry.startTime,
             duration: entry.duration,
-            status: 200, // Resources don't easily expose status code in PT
+            status: 200,
             meta: {
               url: entry.name,
               initiatorType: entry.initiatorType,
@@ -344,7 +386,7 @@ export class SenzorRumAgent {
         }
       }).observe({ type: "resource", buffered: true });
 
-      // --- Enterprise: Long Task Monitoring ---
+      // Long Task Monitoring
       new PerformanceObserver((entryList) => {
         for (const entry of entryList.getEntries()) {
           this.pushSpan({
@@ -353,7 +395,7 @@ export class SenzorRumAgent {
             type: "longtask",
             startTime: entry.startTime,
             duration: entry.duration,
-            status: 500, // Mark as "error-ish" since it blocks UI
+            status: 500,
             meta: {
               attribution: (entry as any).attribution?.[0]?.name || "unknown",
               containerType: (entry as any).attribution?.[0]?.containerType || "unknown",
@@ -362,6 +404,14 @@ export class SenzorRumAgent {
         }
       }).observe({ type: "longtask" });
     } catch (e) {}
+  }
+
+  private computeINP(): number {
+    if (this.inpEntries.length === 0) return 0;
+    const sorted = [...this.inpEntries].sort((a, b) => a - b);
+    if (sorted.length < 50) return sorted[sorted.length - 1];
+    const p98Index = Math.ceil(sorted.length * 0.98) - 1;
+    return sorted[Math.min(p98Index, sorted.length - 1)];
   }
 
   private captureNavigationSpans() {
@@ -421,7 +471,7 @@ export class SenzorRumAgent {
   }
 
   private pushSpan(span: any) {
-    if (this.spanQueue.length >= this.MAX_QUEUE_MEMORY) this.spanQueue.shift(); 
+    if (this.spanQueue.length >= this.MAX_QUEUE_MEMORY) this.spanQueue.shift();
     this.spanQueue.push(span);
     if (this.spanQueue.length >= this.MAX_BATCH_SIZE) this.debouncedFlush();
   }
@@ -456,10 +506,12 @@ export class SenzorRumAgent {
       let startTime: number | undefined;
       let method: string | undefined;
       let fullUrl: string | undefined;
+      // Snapshot trace context at send time to prevent cross-trace leakage
+      const capturedTraceStartTime = self.traceStartTime;
 
       try {
         spanId = generateHex(16);
-        startTime = Date.now() - self.traceStartTime;
+        startTime = Date.now() - capturedTraceStartTime;
         method = xhr.__szMethod;
         fullUrl = xhr.__szUrl;
 
@@ -475,7 +527,7 @@ export class SenzorRumAgent {
 
         xhr.addEventListener("loadend", () => {
           try {
-            const duration = Date.now() - self.traceStartTime - (startTime || 0);
+            const duration = Date.now() - capturedTraceStartTime - (startTime || 0);
 
             let responseHeaders = {};
             try {
@@ -511,7 +563,7 @@ export class SenzorRumAgent {
               name: `${method} ${fullUrl ? new URL(fullUrl, window.location.origin).pathname : 'unknown'}`,
               type: "http",
               startTime,
-              duration,
+              duration: Math.max(0, duration),
               status: xhr.status,
               meta,
             });
@@ -529,6 +581,8 @@ export class SenzorRumAgent {
       let spanId: string | undefined;
       let startTime: number | undefined;
       let reqHeadersObj: any = {};
+      // Snapshot trace context at fetch time to prevent cross-trace leakage
+      const capturedTraceStartTime = self.traceStartTime;
 
       try {
         const requestInfo = args[0];
@@ -549,7 +603,7 @@ export class SenzorRumAgent {
         }
 
         spanId = generateHex(16);
-        startTime = Date.now() - self.traceStartTime;
+        startTime = Date.now() - capturedTraceStartTime;
 
         reqHeadersObj = extractHeaders(init?.headers || (requestInfo instanceof Request ? requestInfo.headers : {}));
 
@@ -570,7 +624,7 @@ export class SenzorRumAgent {
 
       const captureSpan = (status: number, response?: Response, errorMsg?: string) => {
         try {
-          const duration = Date.now() - self.traceStartTime - (startTime || 0);
+          const duration = Date.now() - capturedTraceStartTime - (startTime || 0);
 
           const meta: any = {
             url: fullUrl,
@@ -595,7 +649,7 @@ export class SenzorRumAgent {
             name: `${method} ${fullUrl ? new URL(fullUrl, window.location.origin).pathname : 'unknown'}`,
             type: "http",
             startTime,
-            duration,
+            duration: Math.max(0, duration),
             status,
             meta,
           });
@@ -669,7 +723,7 @@ export class SenzorRumAgent {
 
   private debouncedFlush() {
     if (this.flushTimeout) clearTimeout(this.flushTimeout);
-    this.flushTimeout = setTimeout(() => this.flush(), 100); 
+    this.flushTimeout = setTimeout(() => this.flush(), 100);
   }
 
   private flush() {
@@ -679,28 +733,36 @@ export class SenzorRumAgent {
         this.flushTimeout = null;
       }
 
+      // Capture navigation spans BEFORE splice so they're included in the initial_load trace
+      if (this.isSampled && this.isInitialLoad) {
+        this.captureNavigationSpans();
+      }
+
       if (this.spanQueue.length === 0 && this.errorQueue.length === 0 && this.logQueue.length === 0 && !this.isInitialLoad) return;
 
       const spansToSend = this.spanQueue.splice(0, this.MAX_BATCH_SIZE);
       const errorsToSend = this.errorQueue.splice(0, 20);
-      const logsToSend = this.logQueue.splice(0, this.MAX_BATCH_SIZE); // Extract Logs for batching
+      const logsToSend = this.logQueue.splice(0, this.MAX_BATCH_SIZE);
 
       const payload: any = { traces: [], errors: errorsToSend, logs: logsToSend };
 
       if (this.isSampled) {
-        if (this.isInitialLoad) {
-          this.captureNavigationSpans();
-        }
+        const isFirstFlush = this.isFirstFlushOfTrace;
+        const traceType = this.isInitialLoad ? "initial_load" : (isFirstFlush ? "route_change" : "span_update");
 
         payload.traces.push({
           traceId: this.traceId,
           sessionId: this.sessionId,
-          traceType: this.isInitialLoad ? "initial_load" : (this.isFirstFlushOfTrace ? "route_change" : "span_update"),
+          traceType,
           path: window.location.pathname,
           referrer: document.referrer || "",
-          vitals: { ...this.vitals },
+          // Only send vitals and frustration on the first flush per trace
+          // span_updates carry empty vitals to avoid double-counting on backend
+          vitals: isFirstFlush || this.isInitialLoad ? { ...this.vitals } : {},
           timings: this.isInitialLoad ? this.getNavigationTimings() : {},
-          frustration: { ...this.frustrations },
+          frustration: isFirstFlush || this.isInitialLoad
+            ? { ...this.frustrations }
+            : { rageClicks: 0, deadClicks: 0, errorCount: 0 },
           ...getBrowserContext(),
           spans: spansToSend,
           duration: Date.now() - this.traceStartTime,

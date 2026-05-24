@@ -47,6 +47,12 @@ declare class SenzorRumAgent {
     private breadcrumbs;
     private frustrations;
     private clickHistory;
+    private clsSessionEntries;
+    private clsSessionValue;
+    private clsMaxSessionValue;
+    private clsSessionStartTime;
+    private inpEntries;
+    private readonly MAX_INP_ENTRIES;
     private flushInterval;
     private flushTimeout;
     private readonly MAX_BATCH_SIZE;
@@ -69,6 +75,7 @@ declare class SenzorRumAgent {
     private addBreadcrumb;
     private setupUXListeners;
     private setupPerformanceObservers;
+    private computeINP;
     private captureNavigationSpans;
     private getNavigationTimings;
     private shouldAttachTraceHeader;
