@@ -1,6 +1,14 @@
 interface AnalyticsConfig {
     webId: string;
     endpoint?: string;
+    /** Auto-bind clicks on elements carrying `data-senzor-event`. Default: true. */
+    trackAttributes?: boolean;
+    /** Auto-track clicks on links leaving the current host. Default: false. */
+    outboundLinks?: boolean;
+    /** Auto-track clicks on links to downloadable files. Default: false. */
+    fileDownloads?: boolean;
+    /** Override the default list of download file extensions (without dots). */
+    downloadExtensions?: string[];
 }
 declare class SenzorAnalyticsAgent {
     private config;
@@ -10,8 +18,26 @@ declare class SenzorAnalyticsAgent {
     private unsubRouting;
     private visibilityHandler;
     private beforeUnloadHandler;
+    private clickHandler;
+    private static readonly OUTBOUND_EVENT;
+    private static readonly DOWNLOAD_EVENT;
+    private static readonly MAX_PROPS;
+    private static readonly DEFAULT_DOWNLOAD_EXT;
     init(config: AnalyticsConfig): void;
+    /**
+     * Track a custom event.
+     *
+     *   Senzor.track('Signup', { plan: 'pro', trial: true });
+     *
+     * Properties must be scalars (string / number / boolean); other types are
+     * dropped. Bounded to 50 properties and 512-char string values to match the
+     * server contract. Safe to call any time after init — never throws.
+     */
+    track(eventName: string, props?: Record<string, any>): void;
+    private sanitizeProps;
     destroy(): void;
+    private setupEventCapture;
+    private isDownload;
     private normalizeUrl;
     private manageSession;
     private determineReferrer;
@@ -91,6 +117,7 @@ declare const Analytics: SenzorAnalyticsAgent;
 declare const RUM: SenzorRumAgent;
 declare const Senzor: {
     init: (config: AnalyticsConfig) => void;
+    track: (eventName: string, props?: Record<string, any>) => void;
     initRum: (config: RumConfig) => void;
     startSpan: (name: string, meta?: Record<string, any>) => {
         end: (endMeta?: Record<string, any>) => void;

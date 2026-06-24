@@ -7,6 +7,7 @@ export const RUM = new SenzorRumAgent();
 // Maintain backwards compatibility
 export const Senzor = {
   init: (config: AnalyticsConfig) => Analytics.init(config),
+  track: (eventName: string, props?: Record<string, any>) => Analytics.track(eventName, props),
   initRum: (config: RumConfig) => RUM.init(config),
   startSpan: (name: string, meta?: Record<string, any>) => RUM.startSpan(name, meta),
   destroy: () => { Analytics.destroy(); RUM.destroy(); }
