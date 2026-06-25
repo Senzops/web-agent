@@ -96,6 +96,7 @@ declare class SenzorRumAgent {
     };
     init(config: RumConfig): void;
     private setupLogInterception;
+    private static readonly SESSION_TIMEOUT_MS;
     private manageSession;
     private startNewTrace;
     private addBreadcrumb;

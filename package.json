@@ -1,6 +1,6 @@
 {
   "name": "@senzops/web",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Senzor Web Analytics and RUM SDK",
   "main": "dist/index.js",
   "module": "dist/index.mjs",

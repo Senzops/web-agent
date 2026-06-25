@@ -6,6 +6,7 @@ import {
   extractHeaders,
   safeStringify,
   safeSessionStorage,
+  safeLocalStorage,
   onRouteChange
 } from "./utils";
 import { ErrorEngine } from "./error";
@@ -202,11 +203,23 @@ export class SenzorRumAgent {
     });
   }
 
+  // Sessionize with a 30-minute inactivity timeout (standard analytics rule, and
+  // consistent with the Web Analytics agent). Without this a long-lived tab keeps
+  // one sessionId for days, producing absurd session durations. Re-evaluated on
+  // every activity (init, route change, flush) so the timeout actually applies.
+  private static readonly SESSION_TIMEOUT_MS = 30 * 60 * 1000;
   private manageSession() {
-    if (!safeSessionStorage.getItem("sz_rum_sid")) {
-      safeSessionStorage.setItem("sz_rum_sid", generateUUID());
+    const now = Date.now();
+    const lastActivity = parseInt(safeLocalStorage.getItem("sz_rum_last_activity") || "0", 10);
+    const expired = lastActivity > 0 && now - lastActivity > SenzorRumAgent.SESSION_TIMEOUT_MS;
+
+    let sid = safeSessionStorage.getItem("sz_rum_sid");
+    if (!sid || expired) {
+      sid = generateUUID();
+      safeSessionStorage.setItem("sz_rum_sid", sid);
     }
-    this.sessionId = safeSessionStorage.getItem("sz_rum_sid") as string;
+    safeLocalStorage.setItem("sz_rum_last_activity", String(now));
+    this.sessionId = sid;
   }
 
   private startNewTrace(isInitialLoad: boolean) {
@@ -682,6 +695,7 @@ export class SenzorRumAgent {
     this.unsubRouting = onRouteChange(() => {
       try { this.flush(); } catch (e) {}
       try {
+        this.manageSession(); // re-evaluate the inactivity window on navigation
         this.startNewTrace(false);
         this.addBreadcrumb("navigation", window.location.pathname);
       } catch (e) {}
@@ -739,6 +753,10 @@ export class SenzorRumAgent {
       }
 
       if (this.spanQueue.length === 0 && this.errorQueue.length === 0 && this.logQueue.length === 0 && !this.isInitialLoad) return;
+
+      // Only real telemetry activity refreshes the session window — idle 5s ticks
+      // return above, so a session correctly expires after 30 min of inactivity.
+      this.manageSession();
 
       const spansToSend = this.spanQueue.splice(0, this.MAX_BATCH_SIZE);
       const errorsToSend = this.errorQueue.splice(0, 20);
